@@ -1,0 +1,65 @@
+{
+  "_note": "Reconstructed: questions are verbatim from a live reply; answer_ids and download follow the shape solution.py relied on.",
+  "name": "🔎 You Must Be This Hash to Ride",
+  "prompt": "Three ordinary files arrived without trustworthy labels. Build an identity inventory from the bytes themselves and prove which labels can—and cannot—be trusted.",
+  "questions": [
+    {
+      "id": "evidence-note-filename",
+      "question": "What is the exact filename of the first evidence note?",
+      "artifact": "metadata-day-01-evidence.zip",
+      "answer_format": {
+        "kind": "exact_text",
+        "syntax": "exact base filename including its extension, with no directory path, quotes, or explanatory text"
+      },
+      "normalization": "trim"
+    },
+    {
+      "id": "evidence-note-size-bytes",
+      "question": "What is its exact size in bytes?",
+      "artifact": "metadata-day-01-evidence.zip -> evidence-note.txt",
+      "answer_format": {
+        "kind": "integer",
+        "syntax": "base-10 integer with no units, separators, or explanatory text"
+      },
+      "normalization": "trim"
+    },
+    {
+      "id": "evidence-note-md5",
+      "question": "What is its MD5 digest?",
+      "artifact": "metadata-day-01-evidence.zip -> evidence-note.txt",
+      "answer_format": {
+        "kind": "pattern",
+        "syntax": "exact 32-character hexadecimal MD5 digest; letter case is ignored"
+      },
+      "normalization": "case_insensitive"
+    },
+    {
+      "id": "evidence-note-sha1",
+      "question": "What is its SHA-1 digest?",
+      "artifact": "metadata-day-01-evidence.zip -> evidence-note.txt",
+      "answer_format": {
+        "kind": "pattern",
+        "syntax": "exact 40-character hexadecimal SHA-1 digest; letter case is ignored"
+      },
+      "normalization": "case_insensitive"
+    },
+    {
+      "id": "evidence-note-sha256",
+      "question": "What is its SHA-256 digest?",
+      "artifact": "metadata-day-01-evidence.zip -> evidence-note.txt",
+      "answer_format": {
+        "kind": "pattern",
+        "syntax": "exact 64-character hexadecimal SHA-256 value; use no prefix, spaces, or explanatory text"
+      },
+      "normalization": "case_insensitive"
+    }
+  ],
+  "answer_ids": [
+    "evidence-note-filename",
+    "evidence-note-size-bytes",
+    "evidence-note-md5",
+    "evidence-note-sha1",
+    "evidence-note-sha256"
+  ],
+  "download": "?op=artifact&challenge=metadata-forensics-day-01-hash-to-ride"
+}

@@ -1,0 +1,13 @@
+# attempt archive: artifacts are untrusted bytes, keep them out of git
+runs/
+# credentials
+.env
+*.token
+token.txt
+# python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+build/
+dist/
