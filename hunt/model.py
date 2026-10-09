@@ -64,13 +64,16 @@ class Attempt:
     attempt_id: str | None
     expected_sha256: set[str]
     warnings: list[str] = field(default_factory=list)
-    answer_id_dict: dict[str, str] | None = None  # when the reply maps question id -> answer id
+    answer_id_dict: dict[str, str] | None = None  # when the reply gives answer_ids as a mapping
+    answer_ids_malformed: bool = False  # entries that are not plain ids (objects, lists, ...)
 
     @classmethod
     def from_response(cls, challenge: str, data: dict) -> "Attempt":
         qdicts = list(_iter_question_dicts(data))
         questions = [Question.from_dict(q, i) for i, q in enumerate(qdicts)]
-        answer_ids = [str(a) for a in _answer_ids(data)]
+        raw_ids = _answer_ids(data)
+        scalar = all(isinstance(a, (str, int)) and not isinstance(a, bool) for a in raw_ids)
+        answer_ids = [str(a) for a in raw_ids] if scalar else []
         return cls(
             challenge=challenge,
             raw=data,
@@ -82,6 +85,7 @@ class Attempt:
             expected_sha256=set(_sha256_values(data)),
             answer_id_dict=({str(k): str(v) for k, v in data["answer_ids"].items()}
                             if isinstance(data.get("answer_ids"), dict) else None),
+            answer_ids_malformed=not scalar,
         )
 
     @property
@@ -117,9 +121,16 @@ class Attempt:
         qids = [q.id for q in qs]
         if qs and all(q.answer_id for q in qs):
             return {q.id: str(q.answer_id) for q in qs}, [], False
+        if self.answer_ids_malformed:
+            return {}, ["answer_ids contain entries that are not plain ids; not guessing"], False
         d = self.answer_id_dict
-        if d is not None and set(qids) <= set(d):
-            return {qid: d[qid] for qid in qids}, [], False
+        if d is not None:
+            if set(qids) <= set(d):  # {question_id: answer_id}
+                return {qid: d[qid] for qid in qids}, [], False
+            inverse = {v: k for k, v in d.items()}
+            if set(qids) <= set(inverse) and len(inverse) == len(d):  # {answer_id: question_id}
+                return {qid: inverse[qid] for qid in qids}, [], False
+            return {}, ["answer_ids mapping does not mention the question ids; not guessing"], False
         if not self.answer_ids:
             return {qid: qid for qid in qids}, ["reply had no answer_ids; assuming they equal the question ids"], True
         if set(qids) <= set(self.answer_ids):

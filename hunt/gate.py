@@ -29,8 +29,9 @@ class Decision:
         return not self.held
 
 
-_NO_DIR = re.compile(r"base file ?name|no directory|without (?:any |the |a )?director|not the full path|"
-                     r"file ?name only|no (?:folder|path)")
+_NO_DIR = re.compile(r"base ?(?:file ?)?name|bare file ?name|no directory|without (?:any |the |a )?(?:director|folder|path)|"
+                     r"not the full path|file ?name only|no (?:folder|path)|omit (?:the )?(?:full )?path|"
+                     r"rather than the full path|full path is not accepted")
 
 
 def format_problem(q: Question, value: str) -> str | None:
@@ -92,6 +93,6 @@ def decide(attempt: Attempt, solution: Solution,
 def normalize(q: Question | None, value: str) -> str:
     v = str(value).strip()
     norm = (q.normalization or "").lower() if q else ""
-    if "insensitive" in norm or "ignore" in norm or (q and "case is ignored" in q.syntax.lower()):
+    if ("case" in norm and ("insensitive" in norm or "ignore" in norm)) or (q and "case is ignored" in q.syntax.lower()):
         v = v.casefold()
     return v

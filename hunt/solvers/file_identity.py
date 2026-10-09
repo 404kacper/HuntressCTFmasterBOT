@@ -35,27 +35,48 @@ _DIGEST_RX = [(algo, re.compile(rx)) for algo, rx in (
 # "What is its size?" refers back to the previous question's file; "the file
 # whose name ... its" does not.
 _INHERIT = re.compile(r"^\s*what(?:'s| is| are)\s+(?:its|this file's|that file's)\b|\bthe same file\b", re.I)
+# Asides that name things the question is NOT about ("regardless of what the
+# label claims", "unlike scan.png", "(not the expected value)").
+_ASIDE = re.compile(r"\((?:not|ignoring|excluding|unlike)\b[^)]*\)|\b(?:regardless of|rather than|instead of|ignoring|"
+                    r"unlike|except for|other than|not the|not any)\b[^,;:?()]*", re.I)
 # Questions about claims/labels or searches over files: not identity lookups.
 _NOT_IDENTITY = re.compile(
     r"\b(?:which|whose|what)\s+(?:file|member|entry|one)s?\b|\bwhose\b|\bfiles?\s+(?:that|which|where)\b|"
     r"\blist(?:s|ed|ing)?\b|\bclaim(?:s|ed)?\b|\brecord(?:s|ed)?\b|\bstor(?:e|es|ed)\b|\bmanifest\b|"
     r"\bcentral directory\b|\bheader\b|\baccording to\b|\blabel(?:s|ed|led)?\b|\bdeclared\b|\breported\b|"
-    r"\bexpected\b|\bwrong\b|\bmismatch|\bdoes not match\b|\blies\b|\bspoof", re.I)
+    r"\bexpected\b|\bwrong\b|\bmismatch|\bdoes(?:n't| not) match\b|\blies\b|\bspoof|\bdescrib|\breferenc|"
+    r"\bmention", re.I)
+_SEARCH = re.compile(r"\bwhich (?:file|member|entry)|\bwhose\b|\bfiles?\s+(?:that|which|where)\b|"
+                     r"\bdoes(?:n't| not) match\b|\bmismatch", re.I)
+# Things *inside* a file: "the name of the analyst", "bytes in the sequence number".
+_CONTENT_OBJECT = re.compile(
+    r"\b(?:analyst|host ?name|host|user ?name|user|author|owner|field|line|string|payload|sequence|marker|"
+    r"chunk|section|embedded|original|password|url|domain|address|e-?mail|endpoint|signature|certificate|"
+    r"process|command|variable|function|token|key|word|number|offset|portion|substring|version info|"
+    r"entry point)s?\b|\b(?:first|last)\s+\d+\s+bytes?\b", re.I)
 _ORDINALS = {"first": 0, "1st": 0, "second": 1, "2nd": 1, "third": 2, "3rd": 2,
              "fourth": 3, "4th": 3, "fifth": 4, "5th": 4, "last": -1, "final": -1}
 _ORDINAL_RX = re.compile(r"\b(" + "|".join(_ORDINALS) + r")\s+((?:[a-z0-9]+[\s_-]?){1,3})", re.I)
 _STOP = {"the", "and", "of", "in", "file", "files", "inside", "within", "from", "archive", "zip", "what",
          "exact", "its", "this", "that", "name", "filename", "size", "byte", "bytes", "digest", "hash",
-         "value", "is", "for", "with", "md5", "sha", "sha1", "sha256", "sha512", "crc32", "base", "extension"}
+         "value", "is", "for", "with", "md5", "sha", "sha1", "sha256", "sha512", "crc32", "base", "extension",
+         "you", "your", "downloaded", "download", "give", "true", "actual", "real", "computed"}
 _CONTAINER_WORD = re.compile(r"\b(?:zip|archive|bundle|downloaded|download|container|tarball)\b", re.I)
-_CONTAINER_INNER = re.compile(r"\b(?:in|inside|within|from|of files in|contained in)\s+(?:the|this|that|your)\s+"
-                              r"(?:[\w-]+\s+)?(?:archive|zip|zip file|bundle|download|container|artifact)\b", re.I)
-_NEGATED = re.compile(r"\b(?:not|no|never|without|excluding)\b(?:\s+\S+){0,3}\s*$")
+_CONTAINER_INNER = re.compile(r"\b(?:(?:listed|stored|contained|found|packed|included)\s+)?(?:in|inside|within|from|"
+                              r"of files in|contained in)\s+(?:the|this|that|your)\s+(?:[\w-]+\s+)?(?:archive|zip|"
+                              r"zip file|bundle|download|container|artifact)\b|\b(?:you|we)\s+downloaded\b", re.I)
+_NEG_BEFORE = re.compile(r"\b(?:not|no|never|without|excluding|omit|omitting|rather than|instead of)\b(?:\s+\S+){0,3}\s*$")
+_NEG_AFTER = re.compile(r"^\S*(?:\s+\S+){0,4}?\s*(?:is|are)?\s*(?:not accepted|not allowed|rejected|forbidden|"
+                        r"disallowed|invalid)\b")
 _HEX_LEN = re.compile(r"(\d+)[- ]character[^.;]*hex", re.I)
 _UPPER = re.compile(r"\bupper[- ]?case\b")
-_FULL_PATH = re.compile(r"full path|including (?:its|the) director")
-_STRIP_EXT = re.compile(r"\b(?:without|no|excluding|minus)\s+(?:the\s+|its\s+|any\s+)?(?:file\s+)?extension")
-_KEEP_EXT = re.compile(r"including (?:its|the) extension")
+_FULL_PATH = re.compile(r"full path|including (?:its|the) (?:director|folder)|with (?:its|the) (?:director|folder)")
+_BASE_ONLY = re.compile(r"base ?name|bare file ?name|file ?name only|\bno (?:directory|folder|path)\b|without (?:any |the |"
+                        r"a )?(?:directory|folder|path)|omit (?:the )?(?:full )?path|rather than the full path")
+_STRIP_EXT = re.compile(r"\b(?:without|no|excluding|minus|omit)\s+(?:the\s+|its\s+|any\s+)?(?:file\s+)?extension"
+                        r"(?!\s+(?:removal|stripp|change))|\bstem\b")
+_KEEP_EXT = re.compile(r"including (?:its|the) extension|extension included|keep (?:the |its )?extension|"
+                       r"with (?:its|the) extension")
 
 
 # ---- which file? -----------------------------------------------------------
@@ -77,40 +98,59 @@ def subject(q: Question, ctx: Context) -> tuple[Member | None, float, str]:
         return None, 0.0, "cannot tell which downloaded artifact the question is about"
     kids = arts.children(top)
     if not kids:
+        if top.container or top.expand_failed:
+            return None, 0.0, f"{top.name} looks like a {top.container or 'container'} but could not be listed"
         return top, 0.97, f"{top.name} is a single plain file"
 
-    text = q.text
-    mentioned = [k for k in kids if _mentions(text, k.basename)]
-    if len(mentioned) == 1:
-        return mentioned[0], 0.97, f"question text names {mentioned[0].name}"
+    text = _ASIDE.sub(" ", q.text)
+    ordinal = _ORDINAL_RX.search(text)
+    named, stem = _named_by_siblings(q, top, ctx)
+    pick, pconf, pwhy = _by_ordinal(q, kids, text)
+    # Siblings only vouch for a file when their ids share a stem with this one
+    # ('evidence-note-size' -> 'evidence-note-filename'); 'q1'/'q2' prove nothing.
+    sibling = named[0] if len(named) == 1 and stem > 0 else None
+
+    mentioned = [k for k in kids if "." in k.basename and _mentions(text, k.basename)]
     if len(mentioned) > 1:
         return None, 0.0, "question text names several files: " + ", ".join(k.name for k in mentioned)
-    ordinal = _ORDINAL_RX.search(text)
+    if mentioned:
+        m = mentioned[0]
+        if (sibling is not None and sibling is not m) or (pick is not None and pick is not m):
+            return m, 0.6, f"question text names {m.name} but other evidence points elsewhere"
+        return m, 0.97, f"question text names {m.name}"
     if not ordinal and (_mentions(text, top.basename) or _CONTAINER_WORD.search(_CONTAINER_INNER.sub(" ", text))):
         return top, 0.8, "question seems to ask about the container itself"
     if _INHERIT.search(text) and ctx.subject is not None:
+        if sibling is not None and sibling is not ctx.subject:
+            return ctx.subject, 0.6, f"'its' points at {ctx.subject.name} but sibling questions name {sibling.name}"
         return ctx.subject, min(ctx.subject_confidence, 0.97), "same file as the previous question"
 
-    named = _named_by_siblings(q, top, ctx)
-    pick, pconf, pwhy = _by_ordinal(q, kids)
-    if len(named) == 1:
-        m = named[0]
+    if sibling is not None:
+        m = sibling
         if pick is m:
             return m, 0.97, f"the file the sibling questions name ({m.name}); '{ordinal.group(0).strip()}' agrees"
         if pick is not None:
             return m, 0.6, f"sibling questions name {m.name} but {pwhy}"
-        if not ordinal and set(_words(text)) & set(_words(m.basename)):
-            return m, 0.95, f"the file the sibling questions name ({m.name}); wording agrees"
+        scores = {id(k): len(set(_words(text)) & set(_words(k.basename))) for k in kids}
+        best = max(scores.values())
+        if scores[id(m)] >= 1 and scores[id(m)] == best and sum(v == best for v in scores.values()) == 1:
+            return m, 0.95, f"the file the sibling questions name ({m.name}); wording fits it best"
+        if scores[id(m)] < best:
+            return m, 0.6, f"sibling questions name {m.name} but the wording fits another file better"
         return m, 0.85, f"the file the sibling questions name ({m.name}); wording does not confirm it"
     if len(kids) == 1 and not ordinal:
         return kids[0], 0.97, "the container holds exactly one file"
     if pick is not None:
         return pick, pconf, pwhy
+    if len(named) == 1:
+        return named[0], 0.85, f"the only file other questions name ({named[0].name}), but their ids are unrelated"
     return None, 0.0, f"{len(kids)} files in {top.name} and nothing says which one is meant"
 
 
 def _mentions(text: str, name: str) -> bool:
-    return bool(name) and re.search(r"(?<![\w.-])" + re.escape(name) + r"(?![\w-]|\.\w)", text, re.I) is not None
+    if not name or name.casefold() not in text.casefold():  # cheap prefilter: no regex per member
+        return False
+    return re.search(r"(?<![\w.-])" + re.escape(name) + r"(?![\w-]|\.\w)", text, re.I) is not None
 
 
 def _stem_len(a: str, b: str) -> int:
@@ -121,7 +161,7 @@ def _stem_len(a: str, b: str) -> int:
     return cut + 1
 
 
-def _named_by_siblings(q: Question, top: Member, ctx: Context) -> list[Member]:
+def _named_by_siblings(q: Question, top: Member, ctx: Context) -> tuple[list[Member], int]:
     by_stem: dict[int, dict[int, Member]] = {}
     for other in ctx.attempt.questions:
         oc = other.artifact_chain
@@ -130,7 +170,10 @@ def _named_by_siblings(q: Question, top: Member, ctx: Context) -> list[Member]:
         m = ctx.artifacts.resolve(oc)
         if m is not None:
             by_stem.setdefault(_stem_len(q.id, other.id), {})[id(m)] = m
-    return list(by_stem[max(by_stem)].values()) if by_stem else []
+    if not by_stem:
+        return [], 0
+    best = max(by_stem)
+    return list(by_stem[best].values()), best
 
 
 def _words(s: str) -> list[str]:
@@ -141,8 +184,8 @@ def _words(s: str) -> list[str]:
     return out
 
 
-def _by_ordinal(q: Question, kids: list[Member]) -> tuple[Member | None, float, str]:
-    m = _ORDINAL_RX.search(q.text)
+def _by_ordinal(q: Question, kids: list[Member], text: str) -> tuple[Member | None, float, str]:
+    m = _ORDINAL_RX.search(text)
     if not m:
         return None, 0.0, ""
     idx = _ORDINALS[m.group(1).lower()]
@@ -167,8 +210,15 @@ def _by_ordinal(q: Question, kids: list[Member]) -> tuple[Member | None, float, 
 
 # ---- answer formatting helpers -------------------------------------------
 def _says(syntax: str, rx: re.Pattern) -> bool:
-    """rx occurs in syntax and is not negated ('not the full path')."""
-    return any(not _NEGATED.search(syntax[max(0, m.start() - 40):m.start()]) for m in rx.finditer(syntax))
+    """rx occurs in syntax and is not negated within its own clause
+    ('not the full path', 'full path is NOT accepted')."""
+    for m in rx.finditer(syntax):
+        start = max(syntax.rfind(c, 0, m.start()) for c in ",;:()") + 1
+        ends = [i for i in (syntax.find(c, m.end()) for c in ",;:()") if i != -1]
+        before, after = syntax[start:m.start()], syntax[m.end():min(ends) if ends else len(syntax)]
+        if not _NEG_BEFORE.search(before) and not _NEG_AFTER.search(after):
+            return True
+    return False
 
 
 def _hex_len(syntax: str) -> int | None:
@@ -178,7 +228,7 @@ def _hex_len(syntax: str) -> int | None:
 
 def _wants_upper(syntax: str) -> bool:
     s = syntax.lower()
-    return _says(s, _UPPER) and "lowercase" not in s and "lower-case" not in s and "ignored" not in s
+    return _says(s, _UPPER) and not _says(s, re.compile(r"\blower[- ]?case\b")) and "ignored" not in s
 
 
 def _which_digest(q: Question) -> str | None:
@@ -189,6 +239,12 @@ def _which_digest(q: Question) -> str | None:
         if len(found) > 1:
             return None
     return None
+
+
+def _about_the_file(q: Question) -> bool:
+    """False for searches, claim lookups and questions about content inside a file."""
+    text = _ASIDE.sub(" ", q.text)
+    return not (_SEARCH.search(q.text) or _NOT_IDENTITY.search(text) or _CONTENT_OBJECT.search(text))
 
 
 def _unresolved(why: str) -> Answer:
@@ -214,8 +270,8 @@ def _target(q: Question, ctx: Context):
 @handler(priority=200)
 def file_digest(q: Question, ctx: Context) -> Answer | None:
     algo = _which_digest(q)
-    looks_hex = q.kind == "pattern" or re.search(r"hex|digest|hash", q.syntax, re.I)
-    if not algo or not looks_hex or _NOT_IDENTITY.search(q.text):
+    looks_hex = q.kind in ("pattern", "") or re.search(r"hex|digest|hash", q.syntax, re.I)
+    if not algo or not looks_hex or not _about_the_file(q):
         return None
     t = _target(q, ctx)
     if isinstance(t, Answer):
@@ -228,6 +284,8 @@ def file_digest(q: Question, ctx: Context) -> Answer | None:
         why += f"; syntax expects {want} hex chars but {algo} has {DIGESTS[algo][1]}"
     if _wants_upper(q.syntax):
         value = value.upper()
+        if _says(q.syntax.lower(), re.compile(r"\blower[- ]?case\b")):
+            conf, why = min(conf, 0.5), why + "; syntax asks for both upper and lower case"
     return Answer(value, conf, f"{algo} of {m.path} ({why})", subject=m)
 
 
@@ -241,8 +299,8 @@ _SIZE_NO = re.compile(r"kilo|mega|giga|\bki?b\b|\bmi?b\b|\bbits?\b|\blines?\b|\b
 @handler(priority=200)
 def file_size(q: Question, ctx: Context) -> Answer | None:
     hay = q.haystack
-    if (q.kind not in ("integer", "") or not _SIZE_YES.search(hay) or _SIZE_NO.search(hay)
-            or _NOT_IDENTITY.search(q.text)):
+    if q.kind not in ("integer", "") or not _SIZE_YES.search(hay) or _SIZE_NO.search(hay) \
+            or not _about_the_file(q):
         return None
     t = _target(q, ctx)
     if isinstance(t, Answer):
@@ -251,25 +309,28 @@ def file_size(q: Question, ctx: Context) -> Answer | None:
     return Answer(str(len(data)), conf, f"len({m.path}) ({why})", subject=m)
 
 
-_NAME_YES = re.compile(r"\bfile ?names?\b|\bname of (?:the|this|that|its)\s+(?:[\w-]+\s+){0,3}?"
-                       r"(?:file|note|document|member|entry|artifact|archive|zip|sample|log|attachment)s?\b")
+_FILLER = r"(?:(?!(?:in|of|from|inside|within|for|by|on|at|the|this|that|its)\b)[\w-]+\s+){0,2}?"
+_NAME_YES = re.compile(r"\bfile ?names?\b|\bname of (?:the|this|that|its)\s+" + _FILLER +
+                       r"(?:file|note|document|member|entry|artifact|archive|zip|sample|log|attachment)s?\b(?!')")
 
 
 @handler(priority=200)
 def file_name(q: Question, ctx: Context) -> Answer | None:
-    if q.kind not in ("exact_text", "text", "") or not _NAME_YES.search(q.haystack) \
-            or _NOT_IDENTITY.search(q.text):
+    if q.kind not in ("exact_text", "text", "") or not _NAME_YES.search(q.haystack) or not _about_the_file(q):
         return None
     m, conf, why = subject(q, ctx)
     if m is None:
         return _unresolved(why)
     if any("duplicate entry" in n for n in m.notes):
         conf = min(conf, 0.5)
+    if m.name_is_guess:
+        conf, why = min(conf, 0.5), why + "; the stored name had to be guessed (" + "; ".join(m.notes) + ")"
     syn = q.syntax.lower()
-    if _says(syn, _FULL_PATH):
-        value = m.name
-    elif _STRIP_EXT.search(syn) and not _KEEP_EXT.search(syn):
-        value = m.basename.rsplit(".", 1)[0]
-    else:
-        value = m.basename
+    full, base_only = _says(syn, _FULL_PATH), bool(_BASE_ONLY.search(syn))
+    strip, keep = _says(syn, _STRIP_EXT), bool(_KEEP_EXT.search(syn))
+    if (full and base_only) or (strip and keep):
+        conf, why = min(conf, 0.5), why + "; answer_format syntax gives conflicting instructions"
+    value = m.key if full and not base_only else m.basename
+    if strip and not keep:
+        value = value.rsplit(".", 1)[0] if "." in value.rsplit("/", 1)[-1] else value
     return Answer(value, conf, f"name of {m.path} ({why})", subject=m)

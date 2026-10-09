@@ -282,7 +282,9 @@ class Forensics(unittest.TestCase):
         z = _zip([("big.bin", b"\0" * 2_000_000)])
         with mock.patch("hunt.forensics.artifacts.MAX_TOTAL_BYTES", 1_000_000):
             arts = ArtifactSet([("x.zip", z)])
-            self.assertEqual(arts.children(arts.tops[0]), [])
+            (big,) = arts.children(arts.tops[0])  # still listed, so "which file" logic sees it
+            with self.assertRaises(artifacts.UnreadableMember):
+                big.data
 
 
 class Token(unittest.TestCase):
@@ -440,3 +442,172 @@ class AgainstFakeGameMaster(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+LIVE_QS = json.loads((FIX / "hash_to_ride_start_reply.json").read_text(encoding="utf-8"))["questions"]
+HEX256 = "exact 64-character hexadecimal SHA-256 value"
+
+
+def _decide(questions, files_or_zip, name="e.zip", **kw):
+    a = Attempt.from_response(CID, {"questions": questions, "answer_ids": [q["id"] for q in questions]})
+    data = files_or_zip if isinstance(files_or_zip, bytes) else _zip(files_or_zip)
+    sol = solve(a, ArtifactSet([(name, data)]))
+    return sol, decide(a, sol, **kw)
+
+
+def _q(qid, text, artifact="e.zip", kind="exact_text", syntax="text"):
+    return {"id": qid, "question": text, "artifact": artifact, "answer_format": {"kind": kind, "syntax": syntax}}
+
+
+class SecondReview(unittest.TestCase):
+    """Second adversarial pass: each test is a reproduced claim."""
+
+    NOTE = b"Huntress note\n"
+
+    def test_bare_word_decoy_does_not_count_as_a_mention(self):
+        for decoy in ("note", "evidence"):
+            _, dec = _decide(LIVE_QS, [(decoy, b"decoy"), ("evidence-note.txt", self.NOTE)])
+            self.assertEqual(dec.held, {}, decoy)
+            self.assertEqual(dec.submit["evidence-note-filename"], "evidence-note.txt")
+
+    def test_asides_do_not_redirect_the_question(self):
+        files = [("evidence-note.txt", self.NOTE), ("scan.png", b"x"), ("SHA256SUMS", b"0" * 64 + b"  scan.png\n")]
+        qs = [dict(LIVE_QS[0], question="What is the exact filename of the first evidence note (not scan.png)?"),
+              dict(LIVE_QS[4], id="evidence-note-sha256-b", artifact="e.zip",
+                   question="Ignoring SHA256SUMS, what is the actual SHA-256 digest of the evidence note?")] + LIVE_QS[1:4]
+        _, dec = _decide(qs, files)
+        self.assertEqual(dec.submit.get("evidence-note-filename"), "evidence-note.txt")
+        self.assertIn(dec.submit.get("evidence-note-sha256-b"), (hashlib.sha256(self.NOTE).hexdigest(), None))
+
+    def test_content_questions_are_not_file_questions(self):
+        chain = "e.zip -> evidence-note.txt"
+        qs = [_q("a", "What is the name of the analyst in the note?", chain),
+              _q("b", "What is the name of the host in this log?", chain),
+              _q("c", "What original filename is embedded in the note's version info?", chain),
+              _q("d", "What is the byte length of the collected sequence number?", chain, "integer", "base-10 integer"),
+              _q("e", "How many bytes long is the Endpoint value in the note?", chain, "integer", "base-10 integer"),
+              _q("f", "What is the SHA-256 of the note's first 16 bytes?", chain, "pattern", HEX256),
+              _q("g", "What is the filename of the note that SHA256SUMS describes?", "e.zip")]
+        _, dec = _decide(qs, [("evidence-note.txt", self.NOTE), ("SHA256SUMS", b"")])
+        self.assertEqual(dec.submit, {})
+
+    def test_one_shared_word_is_not_agreement(self):
+        files = [("case/evidence-note.txt", self.NOTE), ("case/evidence-scan.png", b"png?"), ("SHA256SUMS", b"")]
+        qs = [_q("evidence-sha256", "What is its SHA-256 digest?", "e.zip -> case/evidence-note.txt", "pattern", HEX256),
+              _q("evidence-filename", "What is the filename of the evidence scan?"),
+              _q("evidence-md5", "What is the MD5 digest of the evidence image?", "e.zip", "pattern",
+                 "exact 32-character hexadecimal MD5 digest")]
+        _, dec = _decide(qs, files)
+        self.assertNotIn("evidence-filename", dec.submit)
+        self.assertNotIn("evidence-md5", dec.submit)
+
+    def test_its_does_not_override_the_id_stem(self):
+        qs = [_q("task-1-note-sha256", "What is its SHA-256 digest?", "e.zip -> note-a.txt", "pattern", HEX256),
+              _q("task-2-note-sha256", "What is its SHA-256 digest?", "e.zip -> note-b.txt", "pattern", HEX256),
+              _q("task-1-note-size-bytes", "What is its exact size in bytes?", "e.zip", "integer", "base-10 integer")]
+        _, dec = _decide(qs, [("note-a.txt", b"aaaa"), ("note-b.txt", b"bbbbbbbb")])
+        self.assertNotEqual(dec.submit.get("task-1-note-size-bytes"), "8")
+
+    def test_syntax_clauses(self):
+        files = [("case-0142/evidence-note.txt", self.NOTE)]
+
+        def name(syntax):
+            sol, _ = _decide([dict(LIVE_QS[0], answer_format={"kind": "exact_text", "syntax": syntax})], files)
+            a = sol.answers["evidence-note-filename"]
+            return a.value, a.confidence >= 0.9
+        self.assertEqual(name("no quotes; give the full path inside the archive"),
+                         ("case-0142/evidence-note.txt", True))
+        self.assertEqual(name("the bare filename rather than the full path")[0], "evidence-note.txt")
+        self.assertEqual(name("filename (the full path is NOT accepted)")[0], "evidence-note.txt")
+        self.assertEqual(name("exact filename including extension; no path and no extension removal"),
+                         ("evidence-note.txt", True))
+        self.assertEqual(name("extension included (answers with no extension are rejected)")[0], "evidence-note.txt")
+
+        def digest_of(syntax):
+            sol, _ = _decide([dict(LIVE_QS[4], artifact="e.zip -> case-0142/evidence-note.txt",
+                                   answer_format={"kind": "pattern", "syntax": syntax})], files)
+            return sol.answers["evidence-note-sha256"].value
+        self.assertTrue(digest_of("exact 64-character hexadecimal SHA-256, no prefix, UPPERCASE").isupper())
+        self.assertTrue(digest_of("exact 64-character hexadecimal SHA-256, lowercase, not uppercase").islower())
+
+    def test_unlistable_container_is_not_a_plain_file(self):
+        z = bytearray(_zip([("evidence-note.txt", self.NOTE)]))
+        i = bytes(z).rindex(b"PK\x01\x02")
+        z[i:i + 4] = b"XX\x01\x02"
+        _, dec = _decide(LIVE_QS[:1], bytes(z), name="metadata-day-01-evidence.zip")
+        self.assertEqual(dec.submit, {})
+
+    def test_appended_zip_and_tar_with_inner_zip(self):
+        photo = b"\xff\xd8\xff\xe0" + b"j" * 900 + _zip([("flag.txt", b"flag{x}")])
+        sol, dec = _decide([_q("p-md5", "What is the MD5 digest of the photo?", "photo.jpg", "pattern",
+                               "exact 32-character hexadecimal MD5 digest")], photo, name="photo.jpg")
+        self.assertEqual(dec.submit.get("p-md5"), hashlib.md5(photo).hexdigest())
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tf:
+            for n, d in (("evidence-note.txt", self.NOTE), ("tools/helper.zip", _zip([("readme.txt", b"r")]))):
+                ti = tarfile.TarInfo(n)
+                ti.size = len(d)
+                tf.addfile(ti, io.BytesIO(d))
+        qs = [dict(q, artifact=q["artifact"].replace("metadata-day-01-evidence.zip", "case.tar")) for q in LIVE_QS]
+        _, dec = _decide(qs, buf.getvalue(), name="case.tar")
+        self.assertEqual(dec.submit["evidence-note-md5"], hashlib.md5(self.NOTE).hexdigest())
+
+    def test_gzip_is_bounded_and_named_from_its_header(self):
+        import gzip as gz
+        with mock.patch("hunt.forensics.artifacts.MAX_TOTAL_BYTES", 100_000):
+            arts = ArtifactSet([("bomb.gz", gz.compress(b"\0" * 5_000_000))])
+            self.assertEqual(arts.children(arts.tops[0]), [])
+            self.assertTrue(arts.tops[0].expand_failed)
+        buf = io.BytesIO()
+        with gz.GzipFile(filename="evidence-note.txt", fileobj=buf, mode="wb", mtime=0) as g:
+            g.write(self.NOTE)
+        arts = ArtifactSet([("bundle.gz", buf.getvalue())])
+        (kid,) = arts.children(arts.tops[0])
+        self.assertEqual((kid.name, kid.name_is_guess), ("evidence-note.txt", False))
+        arts = ArtifactSet([("bundle.gz", gz.compress(self.NOTE, mtime=0))])
+        self.assertTrue(arts.children(arts.tops[0])[0].name_is_guess)
+
+    def test_path_equivalent_names_are_duplicates(self):
+        _, dec = _decide(LIVE_QS, [("evidence-note.txt", b"decoy\n"), ("./evidence-note.txt", b"real\n")])
+        self.assertEqual(dec.submit, {})
+
+    def test_lying_declared_size_keeps_member_listed(self):
+        z = bytearray(_zip([("disk.img", b"D" * 100), ("readme.txt", b"r")]))
+        info = zipfile.ZipFile(io.BytesIO(bytes(z))).getinfo("disk.img")
+        cd = bytes(z).index(b"PK\x01\x02")  # first central-directory record = disk.img
+        z[cd + 24:cd + 28] = (0xFFFFFFF0).to_bytes(4, "little")
+        q = _q("img-sha256", "What is the SHA-256 digest of the disk image?", "e.zip", "pattern", HEX256)
+        _, dec = _decide([q], bytes(z))
+        self.assertEqual(dec.submit, {})
+
+    def test_claims_parser_honesty_and_robustness(self):
+        note = self.NOTE
+        sums = (f"RMD160 (evidence-note.txt) = {'a' * 40}\n10485760 evidence-note.txt\n").encode()
+        deep = b"[" * 200000 + b"]" * 200000
+        inv = inventory(ArtifactSet([("x.zip", _zip([("evidence-note.txt", note), ("SUMS", sums),
+                                                      ("m.json", deep)]))]))
+        self.assertFalse([c for c in inv["label_checks"] if c["verdict"] == "LIES"])
+
+    def test_inventory_scales(self):
+        files = [(f"f{i}.txt", str(i).encode()) for i in range(3000)]
+        sums = "".join(f"{hashlib.sha256(d).hexdigest()}  {n}\n" for n, d in files).encode()
+        arts = ArtifactSet([("x.zip", _zip(files + [("SHA256SUMS", sums)]))])
+        t = time.perf_counter()
+        inventory(arts)
+        self.assertLess(time.perf_counter() - t, 5.0)
+
+    def test_utf8_name_without_flag_is_a_guess(self):
+        raw = bytearray(_zip([("résumé-note.txt", self.NOTE)]))  # zipfile sets the UTF-8 flag (0x800)...
+        for sig, flag_at in ((b"PK\x03\x04", 6), (b"PK\x01\x02", 8)):  # ...clear it, like Info-ZIP does
+            j = bytes(raw).index(sig)
+            flags = int.from_bytes(raw[j + flag_at:j + flag_at + 2], "little") & ~0x800
+            raw[j + flag_at:j + flag_at + 2] = flags.to_bytes(2, "little")
+        q = dict(LIVE_QS[0], question="What is the exact filename of the first note?")
+        sol, dec = _decide([q], bytes(raw))
+        self.assertEqual(sol.answers[q["id"]].value, "résumé-note.txt")
+        self.assertIn(q["id"], dec.held)
+
+    def test_normalisation_only_casefolds_on_case_words(self):
+        from hunt.gate import normalize
+        q = Attempt.from_response(CID, {"questions": [dict(LIVE_QS[0], normalization="ignore_surrounding_whitespace")]}).questions[0]
+        self.assertNotEqual(normalize(q, "Evidence-Note.TXT"), normalize(q, "evidence-note.txt"))

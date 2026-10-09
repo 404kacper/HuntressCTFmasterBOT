@@ -128,20 +128,22 @@ def _looks_text(data: bytes) -> bool:
 # ---- claimed labels inside the artifact (manifests, sum files) -----------
 # Matched against stripped lines of at most _MAX_LINE chars.
 _MAX_LINE = 512
-_SUM = re.compile(r"([0-9a-fA-F]{8,128})\s+\*?(\S.*)")  # sha256sum / md5sum
+_SUM = re.compile(r"([0-9a-fA-F]{32,128})\s+\*?(\S.*)")  # sha256sum / md5sum (not "10485760 disk.img")
 _BSD = re.compile(r"([A-Za-z0-9_-]+)\s*\(([^()]+)\)\s*=\s*([0-9a-fA-F]{8,128})")  # SHA256 (f) = x
 _KV = re.compile(r"([^:=]*[^:=\s])\s*[:=]\s*([0-9a-fA-F]{32,128})")  # f: x
 _ALGO_KEYS = {k.replace("_", ""): k for k in DIGESTS} | {"sha-1": "sha1", "sha-256": "sha256", "sha-512": "sha512"}
 
 
 def _algo_from(key: str | None, value: str) -> str | None:
+    """Algorithm named by key; with no key, guessed from the hex length. A key
+    naming something we cannot compute (RMD160, MD4, ...) yields None rather
+    than a length guess that would brand an honest label a liar."""
     if key:
         k = key.lower().replace("_", "").replace(" ", "")
         if k in _ALGO_KEYS:
             return _ALGO_KEYS[k]
         k = k.replace("-", "")
-        if k in _ALGO_KEYS:
-            return _ALGO_KEYS[k]
+        return _ALGO_KEYS.get(k)
     return _BY_LENGTH.get(len(value))
 
 
@@ -158,7 +160,7 @@ def claims_in(m: Member) -> list[dict]:
     if stripped[:1] in "[{":
         try:
             out += _claims_json(json.loads(text))
-        except ValueError:
+        except (ValueError, RecursionError):
             pass
     lines = text.splitlines()
     if not out and lines and "," in lines[0]:
@@ -205,7 +207,7 @@ def _claims_records(rows) -> list[dict]:
                 out.append({"target": target, "attribute": "size", "value": v})
             elif re.fullmatch(r"[0-9a-fA-F]{8,128}", v) and (
                     _algo_from(k, "") or any(w in k for w in ("hash", "digest", "checksum"))):
-                algo = _algo_from(k, v)
+                algo = _algo_from(k, "") or _BY_LENGTH.get(len(v))
                 if algo:
                     out.append({"target": target, "attribute": algo, "value": v.lower()})
             elif k in ("type", "mime", "filetype", "file_type", "extension", "ext"):
@@ -235,6 +237,8 @@ def _claims_csv(text: str) -> list[dict]:
 def describe(m: Member, algos=("md5", "sha1", "sha256")) -> dict:
     d: dict = {"path": m.path, "name": m.name, "basename": m.basename, "order": m.order,
                "extension": m.ext}
+    if m.name_is_guess:
+        d["name_is_guess"] = True
     try:
         data = m.data
     except UnreadableMember as e:
@@ -252,6 +256,8 @@ def describe(m: Member, algos=("md5", "sha1", "sha256")) -> dict:
     if m.stored_crc is not None:
         d["stored_crc32"] = f"{m.stored_crc:08x}"
         d["stored_crc32_matches"] = d["stored_crc32"] == digest("crc32", data)
+    if m.expand_failed:
+        d["container_unlistable"] = m.container or True
     if m.notes:
         d["notes"] = list(m.notes)
     return d
@@ -260,11 +266,22 @@ def describe(m: Member, algos=("md5", "sha1", "sha256")) -> dict:
 def inventory(arts: ArtifactSet) -> dict:
     members = arts.files()
     files = [describe(m) for m in members]
-    claims = [c for m in members for c in claims_in(m)]
+    info = {id(m): f for m, f in zip(members, files)}
+    by_name: dict[str, list[Member]] = {}
+    for m in members:
+        by_name.setdefault(m.key, []).append(m)
+        if m.basename != m.key:
+            by_name.setdefault(m.basename, []).append(m)
+    claims = []
+    for m in members:
+        try:
+            claims += claims_in(m)
+        except Exception as e:  # one hostile member must not cost the whole inventory
+            info[id(m)].setdefault("notes", []).append(f"claims parser failed: {type(e).__name__}")
     checks = []
     for c in claims:
-        want = c["target"].replace("\\", "/")
-        targets = [m for m in members if m.name == want or m.basename == want.rsplit("/", 1)[-1]]
+        want = c["target"].replace("\\", "/").strip("/")
+        targets = list({id(t): t for t in by_name.get(want, []) + by_name.get(want.rsplit("/", 1)[-1], [])}.values())
         if not targets:
             checks.append({**c, "verdict": "target-missing"})
             continue
@@ -272,7 +289,7 @@ def inventory(arts: ArtifactSet) -> dict:
             checks.append({**c, "verdict": "target-ambiguous"})
             continue
         t = targets[0]
-        if "unreadable" in next(f for mm, f in zip(members, files) if mm is t):
+        if "unreadable" in info[id(t)]:
             checks.append({**c, "verdict": "target-unreadable"})
             continue
         if c["attribute"] == "size":
