@@ -29,9 +29,19 @@ class Decision:
         return not self.held
 
 
+_NO_DIR = re.compile(r"base file ?name|no directory|without (?:any |the |a )?director|not the full path|"
+                     r"file ?name only|no (?:folder|path)")
+
+
 def format_problem(q: Question, value: str) -> str | None:
     if value == "":
         return "empty answer"
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return "value is not valid text (undecodable bytes in a name?)"
+    if "\ufffd" in value:
+        return "value contains a U+FFFD replacement character"
     if value != value.strip():
         return "leading/trailing whitespace"
     kind = q.kind.lower()
@@ -41,7 +51,7 @@ def format_problem(q: Question, value: str) -> str | None:
     m = re.search(r"(\d+)[- ]character[^.;]*hex", syn)
     if m and not re.fullmatch(r"[0-9a-fA-F]{%d}" % int(m.group(1)), value):
         return f"syntax wants {m.group(1)} hex characters, got {len(value)}: {value[:20]!r}"
-    if "no directory" in syn and ("/" in value or "\\" in value):
+    if _NO_DIR.search(syn) and ("/" in value or "\\" in value):
         return "syntax forbids a directory path"
     if "\n" in value:
         return "multi-line answer"
@@ -49,8 +59,8 @@ def format_problem(q: Question, value: str) -> str | None:
 
 
 def decide(attempt: Attempt, solution: Solution,
-           min_confidence: float = DEFAULT_MIN_CONFIDENCE) -> Decision:
-    ids, warnings = attempt.answer_id_map()
+           min_confidence: float = DEFAULT_MIN_CONFIDENCE, trust_guessed_ids: bool = False) -> Decision:
+    ids, warnings, guessed = attempt.answer_id_mapping()
     warnings = list(warnings) + list(solution.notes)
     submit: dict[str, str] = {}
     held: dict[str, str] = {}
@@ -69,6 +79,9 @@ def decide(attempt: Attempt, solution: Solution,
         elif ans.confidence < min_confidence:
             held[q.id] = f"confidence {ans.confidence:.2f} < {min_confidence:.2f}: {ans.evidence}"
             tentative[ids[q.id]] = ans.value
+        elif guessed and not trust_guessed_ids:
+            held[q.id] = f"answer id {ids[q.id]!r} was guessed ({'; '.join(warnings)})"
+            tentative[ids[q.id]] = ans.value
         else:
             submit[ids[q.id]] = ans.value
     if not attempt.questions:
@@ -79,6 +92,6 @@ def decide(attempt: Attempt, solution: Solution,
 def normalize(q: Question | None, value: str) -> str:
     v = str(value).strip()
     norm = (q.normalization or "").lower() if q else ""
-    if "case" in norm or (q and "case is ignored" in q.syntax.lower()):
+    if "insensitive" in norm or "ignore" in norm or (q and "case is ignored" in q.syntax.lower()):
         v = v.casefold()
     return v

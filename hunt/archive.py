@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .forensics.artifacts import ArtifactSet
-from .gate import decide, normalize
+from .gate import DEFAULT_MIN_CONFIDENCE, decide, normalize
 from .model import Attempt
 from .solvers import solve
 
@@ -37,7 +37,8 @@ class Run:
         return self.path.parent.name
 
     def write_json(self, name: str, obj) -> None:
-        (self.path / name).write_text(json.dumps(obj, indent=2, ensure_ascii=False, default=str),
+        # ensure_ascii: undecodable names (lone surrogates) must not crash the archive
+        (self.path / name).write_text(json.dumps(obj, indent=2, ensure_ascii=True, default=str),
                                       encoding="utf-8")
 
     def read_json(self, name: str):
@@ -96,9 +97,11 @@ class Archive:
         return runs[-1] if runs else None
 
 
-def replay(archive: Archive, challenge: str | None = None) -> list[dict]:
+def replay(archive: Archive, challenge: str | None = None,
+           min_confidence: float = DEFAULT_MIN_CONFIDENCE, trust_guessed_ids: bool = False) -> list[dict]:
     """Re-solve every archived CORRECT attempt offline and compare with what
-    the Game Master accepted. Returns one row per run."""
+    the Game Master accepted, under the same gate settings a race would use:
+    an answer the gate would hold counts as a failure. One row per run."""
     rows = []
     for run in archive.runs(challenge):
         truth = run.correct_answers()
@@ -106,7 +109,7 @@ def replay(archive: Archive, challenge: str | None = None) -> list[dict]:
             continue
         attempt = run.attempt()
         sol = solve(attempt, run.artifact_set())
-        dec = decide(attempt, sol, min_confidence=0.0)
+        dec = decide(attempt, sol, min_confidence, trust_guessed_ids)
         ids = attempt.answer_id_map()[0]
         qs = {ids[q.id]: q for q in attempt.questions if q.id in ids}
         diffs = {}

@@ -94,11 +94,13 @@ def solve(attempt: Attempt, artifacts: ArtifactSet) -> Solution:
             if ans is not None:
                 ans.handler = ans.handler or reg.name
                 ctx.answers[q.id] = ans
-                if ans.subject is not None:
-                    ctx.subject, ctx.subject_confidence = ans.subject, ans.confidence
+                # "its" in the next question may only refer to a file this one resolved.
+                ctx.subject = ans.subject
+                ctx.subject_confidence = ans.confidence if ans.subject is not None else 0.0
                 break
         else:
             unresolved[q.id] = "no handler recognised this question"
+            ctx.subject, ctx.subject_confidence = None, 0.0
     return Solution(ctx.answers, unresolved, notes)
 
 
@@ -106,10 +108,35 @@ _loaded = False
 
 
 def load_handlers() -> None:
-    """Import every handler module. Call before the clock starts."""
+    """Import every handler module and run one throwaway solve, so imports and
+    regex compilation happen before the clock starts, not on it."""
     global _loaded
     if _loaded:
         return
     for mod in pkgutil.iter_modules(__path__):
         importlib.import_module(f"{__name__}.{mod.name}")
     _loaded = True
+    _warm_up()
+
+
+def _warm_up() -> None:
+    import io
+    import zipfile
+
+    from ..gate import decide
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("warm-note.txt", b"warm")
+        zf.writestr("other.bin", b"\0")
+    fmt = {"kind": "pattern", "syntax": "exact 64-character hexadecimal SHA-256 value"}
+    attempt = Attempt.from_response("warm-up", {"questions": [
+        {"id": "w-filename", "question": "What is the exact filename of the first warm note?",
+         "artifact": "w.zip", "answer_format": {"kind": "exact_text", "syntax": "base filename"}},
+        {"id": "w-size", "question": "What is its exact size in bytes?", "artifact": "w.zip -> warm-note.txt",
+         "answer_format": {"kind": "integer", "syntax": "base-10 integer"}},
+        {"id": "w-sha256", "question": "What is its SHA-256 digest?", "artifact": "w.zip -> warm-note.txt",
+         "answer_format": fmt, "normalization": "case_insensitive"},
+        {"id": "w-x", "question": "Which file lies?", "artifact": "w.zip", "answer_format": {"kind": "exact_text"}},
+    ]})
+    decide(attempt, solve(attempt, ArtifactSet([("w.zip", buf.getvalue())])))

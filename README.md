@@ -60,14 +60,29 @@ variant is therefore the closest thing to testing before you submit.
 ## The gate (where the robot stops and asks)
 
 An answer is only sent if it:
-- maps to an `answer_id` from the reply,
+- maps to an `answer_id` from the reply, by id rather than guessed from position. If the
+  ids had to be matched by position, the answers are held unless you pass
+  `--trust-positional-ids`,
 - matches the declared `answer_format` (integer, N hex characters, no path, …),
 - was produced with confidence at or above `--min-confidence` (default 0.9).
 
+The identity handlers deliberately refuse questions about what a label,
+manifest or header *claims* ("which file…", "whose…", "listed", "stored",
+"central directory"…). Duplicate entry names, encrypted entries no known
+password opens, and entries whose stored CRC lies are reported, never
+guessed.
+
 When something is held during a race, you get a prompt showing the seconds left
 on the clock: send the passed answers, send everything, or send nothing. With
-`--no-prompt` (or no terminal) nothing is sent. The bot also refuses to answer
-if the downloaded bytes don't match an artifact SHA-256 given in the reply.
+`--no-prompt` (or no terminal) nothing is sent. The bot also refuses to:
+- answer if the downloaded bytes don't match an artifact SHA-256 given in the reply,
+- answer in a race when the reply has no deadline (start or retry reconnected to an
+  untimed attempt),
+- start or retry, in `solve`, on a route not listed with `run_for_time_supported`
+  (pass `--accept-timer` to override).
+
+If the network drops during submit, the run is still archived and you are
+told the outcome is unknown: check `hunt status CID` before doing anything else.
 
 ## Adding a handler
 
@@ -101,8 +116,10 @@ generality are sound. It does not show that the real server agrees.
 
 ## Safety
 
-- The token is read from the environment only. It is never logged or archived,
-  and it is stripped from requests to any host other than the Game Master.
+- The token is read from the environment only. It is never logged or archived.
+  It is stripped from requests to any host other than the Game Master, and it is
+  never sent over plain HTTP except to localhost. Network errors are reported by
+  type only, because some of them embed header values.
 - Artifacts are parsed in memory and never executed. Archived copies are stored
   as `<sha256>.bin`. Nested archives are expanded lazily, with depth and size limits.
 - `runs/` is git-ignored: it holds untrusted bytes.

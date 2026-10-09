@@ -7,6 +7,7 @@ nothing here knows about any particular challenge.
 from __future__ import annotations
 
 import re
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -19,10 +20,16 @@ from . import config
 
 
 class GMError(RuntimeError):
-    def __init__(self, message: str, status: int | None = None, data=None):
+    def __init__(self, message: str, status: int | None = None, data=None, transport: bool = False):
         super().__init__(message)
         self.status = status
         self.data = data
+        self.transport = transport  # True: we never got an answer (timeout, reset, ...)
+
+
+def _transport_error(e: Exception) -> GMError:
+    # Only the type name: some requests errors embed header values (the token).
+    return GMError(f"network error: {type(e).__name__}", transport=True)
 
 
 @dataclass
@@ -50,7 +57,8 @@ class GameMaster:
         if token is None:
             token = config.load_token()
         self.base = base_url or config.base_url(token)
-        self.host = urlsplit(self.base).netloc
+        parts = urlsplit(self.base)
+        self.scheme, self.host = parts.scheme, parts.netloc
         self.timeout = timeout
         s = requests.Session()
         s.trust_env = config.proxy_env_present()
@@ -59,7 +67,11 @@ class GameMaster:
         s.mount("http://", adapter)
         s.headers["Accept"] = "application/json"
         if token:
-            s.headers["Authorization"] = "Bearer " + token
+            if self.scheme == "https" or parts.hostname in ("127.0.0.1", "localhost", "::1"):
+                s.headers["Authorization"] = "Bearer " + token
+            else:
+                print(f"warning: not sending the token over plain HTTP to {self.host} "
+                      "(the Homebase proxy needs no token)", file=sys.stderr)
         self.s = s
 
     # ---- transport -------------------------------------------------------
@@ -74,12 +86,19 @@ class GameMaster:
 
     def get(self, **params):
         params = {k: v for k, v in params.items() if v is not None}
-        return self._decode(self.s.get(self.base, params=params, timeout=self.timeout))
+        try:
+            r = self.s.get(self.base, params=params, timeout=self.timeout)
+        except requests.RequestException as e:
+            raise _transport_error(e) from None
+        return self._decode(r)
 
     def post(self, body: dict, **params):
         params = {k: v for k, v in params.items() if v is not None}
-        return self._decode(self.s.post(self.base, params=params or None, json=body,
-                                        timeout=self.timeout))
+        try:
+            r = self.s.post(self.base, params=params or None, json=body, timeout=self.timeout)
+        except requests.RequestException as e:
+            raise _transport_error(e) from None
+        return self._decode(r)
 
     def warm(self, challenge: str | None = None, extra_urls: tuple[str, ...] = ()) -> None:
         """Open (and keep alive) the connections the timed path will use."""
@@ -89,7 +108,7 @@ class GameMaster:
         except requests.RequestException:
             pass
         for url in extra_urls:
-            if urlsplit(url).netloc == self.host:
+            if urlsplit(url).netloc == self.host or urlsplit(url).scheme not in ("http", "https"):
                 continue
             try:
                 self.s.head(url, timeout=self.timeout, headers={"Authorization": None})
@@ -129,14 +148,17 @@ class GameMaster:
 
     def artifact(self, challenge: str, download: str | None = None) -> Download:
         t = time.perf_counter()
-        if download:
-            url = urljoin(self.base, download)
-            # Never hand our bearer token to a host that isn't the Game Master.
-            headers = None if urlsplit(url).netloc == self.host else {"Authorization": None}
-            r = self.s.get(url, timeout=self.timeout, headers=headers)
-        else:
-            r = self.s.get(self.base, params={"op": "artifact", "challenge": challenge},
-                           timeout=self.timeout)
+        try:
+            if download:
+                url = urljoin(self.base, download)
+                # Never hand our bearer token to anything but the Game Master itself.
+                same = (urlsplit(url).scheme, urlsplit(url).netloc) == (self.scheme, self.host)
+                r = self.s.get(url, timeout=self.timeout, headers=None if same else {"Authorization": None})
+            else:
+                r = self.s.get(self.base, params={"op": "artifact", "challenge": challenge},
+                               timeout=self.timeout)
+        except requests.RequestException as e:
+            raise _transport_error(e) from None
         if r.status_code >= 400:
             try:
                 data = r.json()

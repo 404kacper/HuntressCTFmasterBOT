@@ -13,7 +13,7 @@ import json
 import re
 import zlib
 
-from .artifacts import ArtifactSet, Member
+from .artifacts import ArtifactSet, Member, UnreadableMember
 
 
 def _h(name):
@@ -126,9 +126,11 @@ def _looks_text(data: bytes) -> bool:
 
 
 # ---- claimed labels inside the artifact (manifests, sum files) -----------
-_SUM = re.compile(r"^\s*([0-9a-fA-F]{8,128})\s+[ *]?(.+?)\s*$")  # sha256sum / md5sum
-_BSD = re.compile(r"^\s*([A-Za-z0-9_-]+)\s*\((.+)\)\s*=\s*([0-9a-fA-F]{8,128})\s*$")  # SHA256 (f) = x
-_KV = re.compile(r"^\s*(.+?)\s*[:=]\s*([0-9a-fA-F]{32,128})\s*$")  # f: x
+# Matched against stripped lines of at most _MAX_LINE chars.
+_MAX_LINE = 512
+_SUM = re.compile(r"([0-9a-fA-F]{8,128})\s+\*?(\S.*)")  # sha256sum / md5sum
+_BSD = re.compile(r"([A-Za-z0-9_-]+)\s*\(([^()]+)\)\s*=\s*([0-9a-fA-F]{8,128})")  # SHA256 (f) = x
+_KV = re.compile(r"([^:=]*[^:=\s])\s*[:=]\s*([0-9a-fA-F]{32,128})")  # f: x
 _ALGO_KEYS = {k.replace("_", ""): k for k in DIGESTS} | {"sha-1": "sha1", "sha-256": "sha256", "sha-512": "sha512"}
 
 
@@ -145,7 +147,10 @@ def _algo_from(key: str | None, value: str) -> str | None:
 
 def claims_in(m: Member) -> list[dict]:
     """Labels one file makes about other files: {target, attribute, value}."""
-    if true_type(m.data)[0] != "text" or len(m.data) > 2_000_000:
+    try:
+        if true_type(m.data)[0] != "text" or len(m.data) > 2_000_000:
+            return []
+    except UnreadableMember:
         return []
     text = m.data.decode("utf-8", "replace")
     out: list[dict] = []
@@ -160,15 +165,18 @@ def claims_in(m: Member) -> list[dict]:
         out += _claims_csv(text)
     if not out:
         for line in lines:
-            if mb := _BSD.match(line):
+            line = line.strip()
+            if len(line) > _MAX_LINE:
+                continue
+            if mb := _BSD.fullmatch(line):
                 algo = _algo_from(mb.group(1), mb.group(3))
                 if algo:
                     out.append({"target": mb.group(2).strip(), "attribute": algo, "value": mb.group(3).lower()})
-            elif ms := _SUM.match(line):
+            elif ms := _SUM.fullmatch(line):
                 algo = _algo_from(None, ms.group(1))
                 if algo:
                     out.append({"target": ms.group(2).strip(), "attribute": algo, "value": ms.group(1).lower()})
-            elif mk := _KV.match(line):
+            elif mk := _KV.fullmatch(line):
                 algo = _algo_from(None, mk.group(2))
                 if algo:
                     out.append({"target": mk.group(1).strip(), "attribute": algo, "value": mk.group(2).lower()})
@@ -225,23 +233,25 @@ def _claims_csv(text: str) -> list[dict]:
 
 # ---- inventory -------------------------------------------------------------
 def describe(m: Member, algos=("md5", "sha1", "sha256")) -> dict:
-    label, exts = true_type(m.data)
-    d = {
-        "path": m.path,
-        "name": m.name,
-        "basename": m.basename,
-        "order": m.order,
-        "size": len(m.data),
-        **{a: digest(a, m.data) for a in algos},
+    d: dict = {"path": m.path, "name": m.name, "basename": m.basename, "order": m.order,
+               "extension": m.ext}
+    try:
+        data = m.data
+    except UnreadableMember as e:
+        d["unreadable"] = str(e)
+        return d
+    label, exts = true_type(data)
+    d.update({
+        "size": len(data),
+        **{a: digest(a, data) for a in algos},
         "true_type": label,
-        "extension": m.ext,
-        "extension_matches_content": (m.ext in exts) if label not in ("data",) else None,
-    }
+        "extension_matches_content": (m.ext in exts) if label != "data" else None,
+    })
     if m.mtime:
         d["mtime"] = m.mtime.isoformat()
     if m.stored_crc is not None:
         d["stored_crc32"] = f"{m.stored_crc:08x}"
-        d["stored_crc32_matches"] = d["stored_crc32"] == digest("crc32", m.data)
+        d["stored_crc32_matches"] = d["stored_crc32"] == digest("crc32", data)
     if m.notes:
         d["notes"] = list(m.notes)
     return d
@@ -258,7 +268,13 @@ def inventory(arts: ArtifactSet) -> dict:
         if not targets:
             checks.append({**c, "verdict": "target-missing"})
             continue
+        if len(targets) > 1:
+            checks.append({**c, "verdict": "target-ambiguous"})
+            continue
         t = targets[0]
+        if "unreadable" in next(f for mm, f in zip(members, files) if mm is t):
+            checks.append({**c, "verdict": "target-unreadable"})
+            continue
         if c["attribute"] == "size":
             actual = str(len(t.data))
         elif c["attribute"] in DIGESTS:
@@ -268,7 +284,7 @@ def inventory(arts: ArtifactSet) -> dict:
         ok = actual.lower() == str(c["value"]).lower()
         checks.append({**c, "actual": actual, "verdict": "trusted" if ok else "LIES"})
     for m, f in zip(members, files):
-        if f["extension_matches_content"] is False:
+        if f.get("extension_matches_content") is False:
             checks.append({"source": "filename extension", "target": f["path"], "attribute": "type",
                            "value": f["extension"], "actual": f["true_type"], "verdict": "LIES"})
         if f.get("stored_crc32_matches") is False:

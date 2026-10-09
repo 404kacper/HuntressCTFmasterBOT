@@ -267,7 +267,13 @@ class FakeGM:
                 code, data = gm.handle("POST", q, body)
                 self._send(code, json.dumps(data).encode(), "application/json")
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        class Server(ThreadingHTTPServer):
+            daemon_threads = True
+
+            def handle_error(self, request, client_address):
+                pass  # clients that time out on purpose (tests) leave broken pipes behind
+
+        self.server = Server(("127.0.0.1", 0), H)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         return f"http://127.0.0.1:{self.server.server_address[1]}/"
 

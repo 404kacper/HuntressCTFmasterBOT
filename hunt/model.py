@@ -64,6 +64,7 @@ class Attempt:
     attempt_id: str | None
     expected_sha256: set[str]
     warnings: list[str] = field(default_factory=list)
+    answer_id_dict: dict[str, str] | None = None  # when the reply maps question id -> answer id
 
     @classmethod
     def from_response(cls, challenge: str, data: dict) -> "Attempt":
@@ -79,6 +80,8 @@ class Attempt:
             deadline=_parse_time(data.get("deadline")),
             attempt_id=_first(data, ("attempt_id", "attempt")),
             expected_sha256=set(_sha256_values(data)),
+            answer_id_dict=({str(k): str(v) for k, v in data["answer_ids"].items()}
+                            if isinstance(data.get("answer_ids"), dict) else None),
         )
 
     @property
@@ -104,17 +107,28 @@ class Attempt:
 
     def answer_id_map(self) -> tuple[dict[str, str], list[str]]:
         """question id -> answer id (+ warnings about how it was decided)."""
+        ids, warnings, _ = self.answer_id_mapping()
+        return ids, warnings
+
+    def answer_id_mapping(self) -> tuple[dict[str, str], list[str], bool]:
+        """Like answer_id_map, plus whether the mapping had to be guessed
+        (by position, or from question ids when the reply gave none)."""
         qs = self.questions
+        qids = [q.id for q in qs]
         if qs and all(q.answer_id for q in qs):
-            return {q.id: str(q.answer_id) for q in qs}, []
+            return {q.id: str(q.answer_id) for q in qs}, [], False
+        d = self.answer_id_dict
+        if d is not None and set(qids) <= set(d):
+            return {qid: d[qid] for qid in qids}, [], False
         if not self.answer_ids:
-            return {q.id: q.id for q in qs}, ["reply had no answer_ids; using question ids"]
-        if {q.id for q in qs} <= set(self.answer_ids):
-            return {q.id: q.id for q in qs}, []
+            return {qid: qid for qid in qids}, ["reply had no answer_ids; assuming they equal the question ids"], True
+        if set(qids) <= set(self.answer_ids):
+            return {qid: qid for qid in qids}, [], False
         if len(self.answer_ids) == len(qs):
+            guessed = len(qs) > 1
             return ({q.id: a for q, a in zip(qs, self.answer_ids)},
-                    ["answer_ids differ from question ids; mapped by position"])
-        return {}, [f"cannot map {len(self.answer_ids)} answer_ids onto {len(qs)} questions"]
+                    ["answer_ids differ from question ids; mapped by position"] if guessed else [], guessed)
+        return {}, [f"cannot map {len(self.answer_ids)} answer_ids onto {len(qs)} questions"], False
 
 
 def _first(data: dict, keys) -> str | None:
@@ -185,11 +199,17 @@ def _sha256_values(obj, depth: int = 0):
             yield from _sha256_values(v, depth + 1)
 
 
+_ISO_FRACTION = re.compile(r"(T\d{2}:\d{2}:\d{2})\.(\d+)")
+
+
 def _parse_time(v) -> datetime | None:
     if not isinstance(v, str) or not v:
         return None
+    # Python 3.10 only accepts 3- or 6-digit fractions and no "Z" suffix.
+    v = v.strip().replace("Z", "+00:00").replace("z", "+00:00")
+    v = _ISO_FRACTION.sub(lambda m: f"{m.group(1)}.{(m.group(2) + '000000')[:6]}", v)
     try:
-        dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(v)
     except ValueError:
         return None
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)

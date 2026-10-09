@@ -23,6 +23,7 @@ from pathlib import Path
 from .archive import Archive, replay
 from .forensics.identity import inventory
 from .gate import DEFAULT_MIN_CONFIDENCE, decide
+from .config import ConfigError
 from .gm import GameMaster, GMError
 from .runner import Outcome, play
 from .solvers import solve
@@ -131,16 +132,16 @@ def _route(gm: GameMaster, cid: str) -> dict | None:
 
 def cmd_solve(args) -> int:
     gm = _gm(args)
-    if not args.retry and not args.accept_timer:
+    if not args.accept_timer:
         route = _route(gm, args.challenge)
         if route is None or not route.get("run_for_time_supported"):
-            print("refusing to start: this route is not listed with run_for_time_supported=true, so a "
-                  "start may begin a real countdown. Check `hunt list`, then pass --accept-timer if "
-                  "that is what you want.")
+            print(f"refusing to {'retry' if args.retry else 'start'}: this route is not listed with "
+                  "run_for_time_supported=true, so it may begin a real countdown. Check `hunt list`, "
+                  "then pass --accept-timer if that is what you want.")
             return 3
     o = play(gm, Archive(args.runs), args.challenge, timed=False, use_retry=args.retry,
              submit=args.submit, min_confidence=args.min_confidence, partial=args.partial,
-             prompt=None if args.yes else _human_prompt)
+             prompt=None if args.yes else _human_prompt, trust_guessed_ids=args.trust_positional_ids)
     _print_outcome(o)
     return 0 if o.status in ("submitted", "dry-run") else 1
 
@@ -148,14 +149,15 @@ def cmd_solve(args) -> int:
 def cmd_race(args) -> int:
     archive = Archive(args.runs)
     if not args.force:
-        rows = replay(archive, args.challenge)
+        rows = replay(archive, args.challenge, args.min_confidence, args.trust_positional_ids)
         if not rows:
             print("refusing to race: no archived CORRECT attempt for this challenge, so the solver is "
                   "unproven here. Do `hunt solve CID --submit` on the untimed attempt first, or pass --force.")
             return 3
         bad = [r for r in rows if not r["ok"]]
         if bad:
-            print("refusing to race: the solver no longer reproduces accepted answers:")
+            print("refusing to race: the solver no longer reproduces accepted answers "
+                  "(or the gate would hold them):")
             for r in bad:
                 print(f"  {r['run']}: {json.dumps(r['diffs'])}")
             return 3
@@ -164,10 +166,8 @@ def cmd_race(args) -> int:
     gm.warm(args.challenge, tuple(_known_artifact_hosts(archive, args.challenge)))
     o = play(gm, archive, args.challenge, timed=True, use_retry=not args.start, submit=True,
              min_confidence=args.min_confidence, partial=args.partial,
-             prompt=None if args.no_prompt else _human_prompt)
+             prompt=None if args.no_prompt else _human_prompt, trust_guessed_ids=args.trust_positional_ids)
     _print_outcome(o, verbose=o.status != "submitted")
-    if o.attempt and not o.attempt.timed and o.status != "gm-error":
-        print("note: the reply carried no deadline, so this was not a timed attempt.")
     for key in ("hall_of_fame_eligible", "unique_attempts_remaining", "ranked_attempts_remaining"):
         if o.attempt and key in o.attempt.raw:
             print(f"{key}: {o.attempt.raw[key]}")
@@ -188,7 +188,7 @@ def cmd_offline(args) -> int:
         return 1
     attempt, arts = run.attempt(), run.artifact_set()
     sol = solve(attempt, arts)
-    dec = decide(attempt, sol, args.min_confidence)
+    dec = decide(attempt, sol, args.min_confidence, args.trust_positional_ids)
     _print_outcome(Outcome("dry-run", f"re-solved {run.path} offline", attempt, sol, dec))
     if args.inventory:
         print(json.dumps(inventory(arts), indent=2, ensure_ascii=False))
@@ -196,7 +196,7 @@ def cmd_offline(args) -> int:
 
 
 def cmd_replay(args) -> int:
-    rows = replay(Archive(args.runs), args.challenge)
+    rows = replay(Archive(args.runs), args.challenge, args.min_confidence, args.trust_positional_ids)
     if not rows:
         print("no archived CORRECT attempts yet")
         return 1
@@ -216,12 +216,13 @@ def cmd_rehearse(args) -> int:
             archive = Archive(tmp)
             gm = GameMaster(base_url=url, token=fake.token)
             # The untimed attempt first (like real play), then timed retries.
-            first = play(gm, archive, CID, timed=False, use_retry=False, submit=True, partial=False)
+            first = play(gm, archive, CID, timed=False, use_retry=False, submit=True, partial=False,
+                         trust_guessed_ids=args.opaque_ids)
             print(f"regular: {first.status} {first.reply}")
             for i in range(args.variants):
                 gm.warm(CID)
                 o = play(gm, archive, CID, timed=True, use_retry=True, submit=True,
-                         min_confidence=args.min_confidence)
+                         min_confidence=args.min_confidence, trust_guessed_ids=args.opaque_ids)
                 res = (o.reply or {}).get("result")
                 ok += res == "CORRECT"
                 ms = o.timings.get("start->submit-reply", 0) * 1000
@@ -260,6 +261,8 @@ def main(argv=None) -> int:
         p.add_argument("--min-confidence", type=float, default=DEFAULT_MIN_CONFIDENCE)
         p.add_argument("--partial", action="store_true",
                        help="when something is held and nobody answers the prompt, still send the rest")
+        p.add_argument("--trust-positional-ids", action="store_true",
+                       help="send answers even when answer_ids had to be matched to questions by position")
 
     p = sub.add_parser("solve", help="untimed attempt; dry run unless --submit")
     p.add_argument("challenge")
@@ -274,7 +277,8 @@ def main(argv=None) -> int:
     p = sub.add_parser("race", help="timed attempt for the Hall of Fame")
     p.add_argument("challenge")
     p.add_argument("--start", action="store_true",
-                   help="use start (never-started challenge) instead of retry")
+                   help="use start instead of retry (for a challenge never started; start reconnects "
+                        "to whatever attempt already exists)")
     p.add_argument("--force", action="store_true", help="skip the regression requirement")
     p.add_argument("--no-prompt", action="store_true")
     gate_opts(p)
@@ -284,10 +288,13 @@ def main(argv=None) -> int:
     p.add_argument("challenge")
     p.add_argument("--inventory", action="store_true")
     p.add_argument("--min-confidence", type=float, default=DEFAULT_MIN_CONFIDENCE)
+    p.add_argument("--trust-positional-ids", action="store_true")
     p.set_defaults(fn=cmd_offline)
 
     p = sub.add_parser("replay")
     p.add_argument("challenge", nargs="?")
+    p.add_argument("--min-confidence", type=float, default=DEFAULT_MIN_CONFIDENCE)
+    p.add_argument("--trust-positional-ids", action="store_true")
     p.set_defaults(fn=cmd_replay)
 
     p = sub.add_parser("rehearse", help="race a local fake Game Master")
@@ -303,6 +310,9 @@ def main(argv=None) -> int:
         return args.fn(args)
     except GMError as e:
         print(f"Game Master error: {e}", file=sys.stderr)
+        return 2
+    except ConfigError as e:
+        print(f"config error: {e}", file=sys.stderr)
         return 2
 
 

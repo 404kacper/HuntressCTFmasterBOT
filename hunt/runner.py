@@ -39,7 +39,7 @@ class Outcome:
 
 def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_retry: bool,
          submit: bool, min_confidence: float = DEFAULT_MIN_CONFIDENCE, partial: bool = False,
-         prompt: Prompt | None = None) -> Outcome:
+         prompt: Prompt | None = None, trust_guessed_ids: bool = False) -> Outcome:
     load_handlers()  # imports happen before the clock, not on it
     clock = time.perf_counter
     t: dict[str, float] = {}
@@ -55,6 +55,11 @@ def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_r
     if not attempt.downloads and (attempt.result or not attempt.questions):
         run = _archive(archive, attempt, data, [], None, None, None, None)
         return Outcome("no-artifact", _no_artifact_message(attempt), attempt, run=run, timings=t)
+    if timed and not attempt.timed:
+        run = _archive(archive, attempt, data, [], None, None, None, None)
+        return Outcome("not-timed", "the reply has no deadline: this reconnected to an existing untimed "
+                       "attempt. Finish it with `hunt solve CID --submit` first, then race.",
+                       attempt, run=run, timings=t)
 
     try:
         t1 = clock()
@@ -74,7 +79,7 @@ def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_r
     t2 = clock()
     arts = ArtifactSet([(d.filename or "", d.data) for d in downloads])
     solution = solve(attempt, arts)
-    decision = decide(attempt, solution, min_confidence)
+    decision = decide(attempt, solution, min_confidence, trust_guessed_ids)
     t["solve"] = clock() - t2
 
     sent = None
@@ -87,24 +92,32 @@ def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_r
         elif partial:
             sent = decision.submit
     reply = None
+    message = ""
     if sent:
         t3 = clock()
         try:
             reply = gm.submit(challenge, sent)
         except GMError as e:
             reply = {"error": str(e), "data": e.data}
+            if e.transport:
+                message = ("the submit got no reply, so its outcome is UNKNOWN. Run `hunt status CID` "
+                           "before doing anything else; do not resubmit blindly.")
         t["submit"] = clock() - t3
     t["start->submit-reply"] = clock() - t0
 
     # ---- off the clock ----------------------------------------------------
-    run = _archive(archive, attempt, data, downloads, arts, solution, decision, (sent, reply), t)
+    try:
+        run = _archive(archive, attempt, data, downloads, arts, solution, decision, (sent, reply), t)
+    except Exception as e:  # never lose the reply because the disk said no
+        run = None
+        message += f" (archiving failed: {type(e).__name__}: {e})"
     if sent:
         status = "submitted"
     elif submit:
         status = "held"
     else:
         status = "dry-run"
-    return Outcome(status, "", attempt, solution, decision, sent, reply, run, t)
+    return Outcome(status, message.strip(), attempt, solution, decision, sent, reply, run, t)
 
 
 def _no_artifact_message(a: Attempt) -> str:
@@ -119,6 +132,8 @@ def _archive(archive: Archive, attempt: Attempt, data: dict, downloads: list[Dow
              submitted, timings: dict | None = None) -> Run:
     run = archive.new_run(attempt.challenge, "timed" if attempt.timed else "regular")
     run.write_json("start.json", data)
+    if submitted and submitted[0]:  # ground truth first, before anything that could fail
+        run.write_json("submit.json", {"sent": submitted[0], "reply": submitted[1]})
     if downloads:
         run.write_artifacts([(d.filename, d.data, d.url) for d in downloads])
     if solution is not None and decision is not None:
@@ -135,6 +150,4 @@ def _archive(archive: Archive, attempt: Attempt, data: dict, downloads: list[Dow
             run.write_json("inventory.json", inventory(arts))
         except Exception as e:  # analysis must never lose the archive
             run.write_json("inventory.json", {"error": repr(e)})
-    if submitted and submitted[0]:
-        run.write_json("submit.json", {"sent": submitted[0], "reply": submitted[1]})
     return run
