@@ -61,6 +61,7 @@ class GameMaster:
         self.base = base_url or config.base_url(token)
         parts = urlsplit(self.base)
         self.scheme, self.host = parts.scheme, parts.netloc
+        self.prefix = parts.path.rstrip("/")  # '' for the direct host, '/huntress-ctf-proxy' on Homebase
         self.timeout = timeout
         # start/retry can wait while the Game Master prepares a fresh variant;
         # that wait is not on the clock, so give it room instead of giving up.
@@ -154,19 +155,40 @@ class GameMaster:
         return self.post({"challenge": challenge,
                           "answers": {str(k): str(v) for k, v in answers.items()}})
 
-    def artifact(self, challenge: str, download: str | None = None) -> Download:
+    def download_url(self, download: str | None) -> str | None:
+        """Absolute URL for the reply's download link, or None to use the
+        documented op=artifact on the base URL instead. Behind a proxy that
+        lives under a path (Homebase: http://10.0.0.219/huntress-ctf-proxy) a
+        root-relative link such as '/artifact/x' resolves outside the proxy and
+        404s, so there the documented operation is used from the start."""
+        if not download:
+            return None
+        url = urljoin(self.base, download)
+        parts = urlsplit(url)
+        if (parts.scheme, parts.netloc) == (self.scheme, self.host) and self.prefix \
+                and parts.path.rstrip("/") != self.prefix and not parts.path.startswith(self.prefix + "/"):
+            return None
+        return url
+
+    def _fetch(self, challenge: str, url: str | None) -> requests.Response:
         t = time.perf_counter()
         try:
-            if download:
-                url = urljoin(self.base, download)
-                # Never hand our bearer token to anything but the Game Master itself.
-                same = (urlsplit(url).scheme, urlsplit(url).netloc) == (self.scheme, self.host)
-                r = self.s.get(url, timeout=self.timeout, headers=None if same else {"Authorization": None})
-            else:
-                r = self.s.get(self.base, params={"op": "artifact", "challenge": challenge},
-                               timeout=self.timeout)
+            if url is None:
+                return self.s.get(self.base, params={"op": "artifact", "challenge": challenge},
+                                  timeout=self.timeout)
+            # Never hand our bearer token to anything but the Game Master itself.
+            same = (urlsplit(url).scheme, urlsplit(url).netloc) == (self.scheme, self.host)
+            return self.s.get(url, timeout=self.timeout, headers=None if same else {"Authorization": None})
         except requests.RequestException as e:
-            raise _transport_error(e) from None
+            raise _transport_error(e, "artifact download", time.perf_counter() - t) from None
+
+    def artifact(self, challenge: str, download: str | None = None) -> Download:
+        t = time.perf_counter()
+        url = self.download_url(download)
+        r = self._fetch(challenge, url)
+        if r.status_code == 404 and url is not None:
+            # The link does not work from where we are; the documented operation is the fallback.
+            r = self._fetch(challenge, None)
         if r.status_code >= 400:
             try:
                 data = r.json()

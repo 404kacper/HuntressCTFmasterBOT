@@ -139,9 +139,13 @@ def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_r
 
 def _finished(challenge: str, data: dict) -> bool:
     """A reconnect to an attempt that is already solved or expired (whether or
-    not the reply still carries its download link)."""
+    not the reply still carries its download link), including a timed attempt
+    whose deadline has passed, e.g. one a failed earlier race left behind."""
     a = Attempt.from_response(challenge, data)
-    return (a.result or "").upper() in ("CORRECT", "EXPIRED") or bool(data.get("solved_by"))
+    if (a.result or "").upper() in ("CORRECT", "EXPIRED") or data.get("solved_by"):
+        return True
+    left = a.seconds_left()
+    return left is not None and left <= 0
 
 
 def _no_artifact_message(a: Attempt) -> str:

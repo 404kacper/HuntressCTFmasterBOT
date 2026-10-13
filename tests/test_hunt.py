@@ -472,6 +472,8 @@ class AgainstFakeGameMaster(unittest.TestCase):
         self.assertTrue(_finished(CID, {"result": "CORRECT", "download": "?op=artifact", "questions": LIVE_QS}))
         self.assertTrue(_finished(CID, {"result": "expired", "download": "?op=artifact"}))
         self.assertFalse(_finished(CID, {"download": "?op=artifact", "questions": LIVE_QS}))
+        self.assertTrue(_finished(CID, {"download": "/artifact/x", "deadline": "2026-01-01T00:00:00Z"}))
+        self.assertFalse(_finished(CID, {"download": "/artifact/x", "deadline": "2999-01-01T00:00:00Z"}))
 
     def test_archive_keeps_ids_with_slashes(self):
         run = Archive(self.runs).new_run("metadata-forensics-day-01-hash-to-ride/time_trial", "regular")
@@ -491,6 +493,27 @@ class AgainstFakeGameMaster(unittest.TestCase):
         self.assertEqual(o2.status, "gm-error")
         self.assertIn("hunt status", o2.message)
         self.assertIn("start", o2.message)
+
+    def test_root_relative_links_behind_the_homebase_proxy(self):
+        # Live failure: '/artifact/x' resolved outside http://10.0.0.219/huntress-ctf-proxy and 404ed.
+        fake, url = self._fake(seed=19, root_links=True, proxy_prefix="/huntress-ctf-proxy")
+        self.assertTrue(url.endswith("/huntress-ctf-proxy"))
+        o = play(GameMaster(url, fake.token), Archive(self.runs), CID, timed=True, use_retry=None, submit=True)
+        self.assertEqual((o.status, (o.reply or {}).get("result")), ("submitted", "CORRECT"))
+        self.assertEqual(o.downloads[0].url.split("?")[0], url)  # went straight to op=artifact, no 404 first
+
+    def test_root_relative_links_on_the_direct_host(self):
+        fake, url = self._fake(seed=20, root_links=True)
+        o = play(GameMaster(url, fake.token), Archive(self.runs), CID, timed=True, use_retry=None, submit=True)
+        self.assertEqual((o.reply or {}).get("result"), "CORRECT")
+        self.assertIn("/artifact/", o.downloads[0].url)
+
+    def test_dead_download_link_falls_back_to_op_artifact(self):
+        fake, url = self._fake(seed=21)
+        orig = fake._view
+        fake._view = lambda a: {**orig(a), "download": "/artifact/not-this-one"}
+        o = play(GameMaster(url, fake.token), Archive(self.runs), CID, timed=True, use_retry=None, submit=True)
+        self.assertEqual((o.reply or {}).get("result"), "CORRECT")
 
     def test_ping_reports_round_trip_and_server_time(self):
         fake, url = self._fake(seed=16)
