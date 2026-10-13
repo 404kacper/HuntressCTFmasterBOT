@@ -429,6 +429,32 @@ class AgainstFakeGameMaster(unittest.TestCase):
         self.assertEqual(code, 3, out)
         self.assertIsNone(fake.attempt)
 
+    def test_race_auto_picks_start_or_retry(self):
+        # never started: start(run_for_time) opens the timed attempt
+        fake, url = self._fake(seed=12)
+        code, out = self._cli(fake, url, "race", CID, "--force", "--no-prompt")
+        self.assertEqual(code, 0, out)
+        self.assertEqual((fake.attempt.timed, fake.attempt.state), (True, "solved"))
+
+    def test_race_after_solving_with_another_script(self):
+        # solved earlier with solution.py (nothing archived): refusal explains, --force races via retry
+        fake2, url2 = self._fake(seed=13)
+        gm = GameMaster(url2, fake2.token)
+        gm.start(CID)
+        gm.submit(CID, fake2.attempt.variant.truth)
+        code, out = self._cli(fake2, url2, "race", CID, "--no-prompt")
+        self.assertEqual(code, 3, out)
+        self.assertIn("--force", out)
+        code, out = self._cli(fake2, url2, "race", CID, "--force", "--no-prompt")
+        self.assertEqual(code, 0, out)
+        self.assertEqual((fake2.attempt.timed, fake2.attempt.state, len(fake2.history)), (True, "solved", 2))
+
+    def test_race_on_timed_by_default_route(self):
+        fake, url = self._fake(seed=14, timed_by_default=True)
+        code, out = self._cli(fake, url, "race", CID, "--force", "--no-prompt")
+        self.assertEqual(code, 0, out)
+        self.assertEqual((fake.attempt.timed, fake.attempt.state), (True, "solved"))
+
     def test_replay_catches_a_regression(self):
         fake, url = self._fake(seed=4)
         play(GameMaster(url, fake.token), Archive(self.runs), CID, timed=False, use_retry=False, submit=True)

@@ -37,18 +37,27 @@ class Outcome:
     timings: dict[str, float] = field(default_factory=dict)
 
 
-def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_retry: bool,
+def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_retry: bool | None,
          submit: bool, min_confidence: float = DEFAULT_MIN_CONFIDENCE, partial: bool = False,
          prompt: Prompt | None = None, trust_guessed_ids: bool = False) -> Outcome:
+    """use_retry: True sends op=retry, False sends start. None (auto) sends
+    start, and if that only reconnects to a finished attempt, follows with
+    retry. Reconnecting starts no clock, so the extra request costs no time."""
     load_handlers()  # imports happen before the clock, not on it
     clock = time.perf_counter
     t: dict[str, float] = {}
+    rft = True if timed else None
     t0 = clock()
     try:
-        rft = True if timed else None
-        data = gm.retry(challenge, run_for_time=rft) if use_retry else gm.start(challenge, run_for_time=rft)
+        if use_retry:
+            data = gm.retry(challenge, run_for_time=rft)
+        else:
+            data = gm.start(challenge, run_for_time=rft)
+            if use_retry is None and _finished(challenge, data):
+                t0 = clock()
+                data = gm.retry(challenge, run_for_time=rft)
     except GMError as e:
-        return Outcome("gm-error", f"{'retry' if use_retry else 'start'} refused: {e}", reply=e.data)
+        return Outcome("gm-error", f"the Game Master refused: {e}", reply=e.data)
     t["start"] = clock() - t0
     attempt = Attempt.from_response(challenge, data)
 
@@ -118,6 +127,11 @@ def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_r
     else:
         status = "dry-run"
     return Outcome(status, message.strip(), attempt, solution, decision, sent, reply, run, t)
+
+
+def _finished(challenge: str, data: dict) -> bool:
+    a = Attempt.from_response(challenge, data)
+    return not a.downloads and (a.result or "").upper() in ("CORRECT", "EXPIRED")
 
 
 def _no_artifact_message(a: Attempt) -> str:

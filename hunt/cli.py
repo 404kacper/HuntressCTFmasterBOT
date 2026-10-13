@@ -6,7 +6,7 @@
   hunt solve CID                     untimed: start/reconnect, download, solve, show; nothing sent
   hunt solve CID --submit            ...and submit if every answer passes the gate
   hunt solve CID --retry             fresh regular variant (after a confirmed solve)
-  hunt race CID                      timed Hall-of-Fame run (retry with run_for_time)
+  hunt race CID                      timed Hall-of-Fame run (start, or retry if already finished)
   hunt offline CID                   re-solve the latest archived attempt, no network
   hunt replay [CID]                  regression: re-solve every archived CORRECT attempt
   hunt rehearse                      full race against a local fake Game Master
@@ -14,7 +14,9 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
+import os
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -23,6 +25,7 @@ from pathlib import Path
 from .archive import Archive, replay
 from .forensics.identity import inventory
 from .gate import DEFAULT_MIN_CONFIDENCE, decide
+from . import config
 from .config import ConfigError
 from .gm import GameMaster, GMError
 from .runner import Outcome, play
@@ -38,7 +41,13 @@ def _utf8_stdio() -> None:
 
 
 def _gm(args) -> GameMaster:
-    return GameMaster(base_url=args.url)
+    token = config.load_token()
+    if token is None and not (args.url or os.environ.get("HUNTRESS_GM_URL") or os.environ.get("GM")) \
+            and sys.stdin.isatty():
+        # Hidden prompt: nothing on screen, nothing in shell history.
+        token = config.clean_token(getpass.getpass(
+            "Game Master token (typing is hidden; press Enter if you are on the Homebase VM): "))
+    return GameMaster(base_url=args.url, token=token or "")
 
 
 # ---- printing --------------------------------------------------------------
@@ -151,8 +160,13 @@ def cmd_race(args) -> int:
     if not args.force:
         rows = replay(archive, args.challenge, args.min_confidence, args.trust_positional_ids)
         if not rows:
-            print("refusing to race: no archived CORRECT attempt for this challenge, so the solver is "
-                  "unproven here. Do `hunt solve CID --submit` on the untimed attempt first, or pass --force.")
+            print("refusing to race: the bot has not yet been proven CORRECT on this challenge.\n"
+                  "  Practise without a clock first:\n"
+                  "    py -m hunt solve CID            (look at the answers; nothing is sent)\n"
+                  "    py -m hunt solve CID --submit   (send them for real, still no clock)\n"
+                  "  If solve says 'already solved', get a fresh untimed copy with\n"
+                  "    py -m hunt solve CID --retry    and then  py -m hunt solve CID --submit\n"
+                  "  Or race anyway, trusting the bot:  py -m hunt race CID --force")
             return 3
         bad = [r for r in rows if not r["ok"]]
         if bad:
@@ -164,7 +178,8 @@ def cmd_race(args) -> int:
         print(f"regression: {len(rows)} archived CORRECT attempt(s) reproduce.")
     gm = _gm(args)
     gm.warm(args.challenge, tuple(_known_artifact_hosts(archive, args.challenge)))
-    o = play(gm, archive, args.challenge, timed=True, use_retry=not args.start, submit=True,
+    use_retry = True if args.retry else False if args.start else None  # None: start, or retry if finished
+    o = play(gm, archive, args.challenge, timed=True, use_retry=use_retry, submit=True,
              min_confidence=args.min_confidence, partial=args.partial,
              prompt=None if args.no_prompt else _human_prompt, trust_guessed_ids=args.trust_positional_ids)
     _print_outcome(o, verbose=o.status != "submitted")
@@ -221,7 +236,7 @@ def cmd_rehearse(args) -> int:
             print(f"regular: {first.status} {first.reply}")
             for i in range(args.variants):
                 gm.warm(CID)
-                o = play(gm, archive, CID, timed=True, use_retry=True, submit=True,
+                o = play(gm, archive, CID, timed=True, use_retry=None, submit=True,
                          min_confidence=args.min_confidence, trust_guessed_ids=args.opaque_ids)
                 res = (o.reply or {}).get("result")
                 ok += res == "CORRECT"
@@ -276,9 +291,10 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("race", help="timed attempt for the Hall of Fame")
     p.add_argument("challenge")
-    p.add_argument("--start", action="store_true",
-                   help="use start instead of retry (for a challenge never started; start reconnects "
-                        "to whatever attempt already exists)")
+    how = p.add_mutually_exclusive_group()
+    how.add_argument("--start", action="store_true",
+                     help="only send start (by default: start, then retry if that attempt is already finished)")
+    how.add_argument("--retry", action="store_true", help="only send retry")
     p.add_argument("--force", action="store_true", help="skip the regression requirement")
     p.add_argument("--no-prompt", action="store_true")
     gate_opts(p)
