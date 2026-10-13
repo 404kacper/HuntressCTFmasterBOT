@@ -35,6 +35,7 @@ class Outcome:
     reply: dict | None = None
     run: Run | None = None
     timings: dict[str, float] = field(default_factory=dict)
+    downloads: list[Download] = field(default_factory=list)
 
 
 def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_retry: bool | None,
@@ -126,7 +127,7 @@ def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_r
         status = "held"
     else:
         status = "dry-run"
-    return Outcome(status, message.strip(), attempt, solution, decision, sent, reply, run, t)
+    return Outcome(status, message.strip(), attempt, solution, decision, sent, reply, run, t, downloads)
 
 
 def _finished(challenge: str, data: dict) -> bool:

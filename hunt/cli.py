@@ -3,6 +3,7 @@
   hunt list [--day N] [--lane L]     what's out there (and which routes are safe to peek at)
   hunt openapi                       save the live API spec to docs/openapi.json
   hunt status CID
+  hunt ping                          network round trip vs server time (compare your PC and Homebase)
   hunt solve CID                     untimed: start/reconnect, download, solve, show; nothing sent
   hunt solve CID --submit            ...and submit if every answer passes the gate
   hunt solve CID --retry             fresh regular variant (after a confirmed solve)
@@ -18,16 +19,20 @@ import getpass
 import json
 import os
 import re
+import socket
+import statistics
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .archive import Archive, replay
 from .forensics.identity import inventory
-from .gate import DEFAULT_MIN_CONFIDENCE, decide
 from . import config
 from .config import ConfigError
+from .gate import DEFAULT_MIN_CONFIDENCE, decide
 from .gm import GameMaster, GMError
 from .runner import Outcome, play
 from .solvers import solve
@@ -87,6 +92,10 @@ def _print_outcome(o: Outcome, verbose: bool = True) -> None:
         print(f"\ndry run: {n} answer(s) ready, {held} held. Re-run with --submit to send.")
     if o.timings:
         print("timings: " + "  ".join(f"{k}={v * 1000:.1f}ms" for k, v in o.timings.items()))
+    for d in o.downloads:
+        if d.redirects:
+            print(f"note: the artifact came from {urlsplit(d.url).netloc} after {d.redirects} redirect(s); "
+                  "each redirect to another host costs a new connection on the clock")
 
 
 def _human_prompt(attempt, decision, solution) -> str:
@@ -139,6 +148,54 @@ def cmd_status(args) -> int:
 
 def _norm(text) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(text).lower()).strip()
+
+
+def cmd_ping(args) -> int:
+    """Where does the time go? Pure network round trip (TCP handshake, no
+    server code involved) versus a full request on a warm connection."""
+    gm = _gm(args)
+    parts = urlsplit(gm.base)
+    host, port = parts.hostname, parts.port or (443 if parts.scheme == "https" else 80)
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError as e:
+        print(f"cannot resolve {host}: {e}")
+        return 2
+    addr = infos[0][4]
+    print(f"{gm.base}  ->  {addr[0]}:{port}")
+    rtts = []
+    for _ in range(args.count):
+        t = time.perf_counter()
+        try:
+            with socket.create_connection(addr[:2], timeout=5):
+                rtts.append(time.perf_counter() - t)
+        except OSError as e:
+            print(f"  tcp connect failed: {e}")
+            break
+    gm.warm(None)  # TLS + keep-alive set up, like race does
+    reqs = []
+    for _ in range(args.count):
+        t = time.perf_counter()
+        try:
+            gm.get(op="openapi")
+        except GMError as e:
+            print(f"  request failed: {e}")
+            break
+        reqs.append(time.perf_counter() - t)
+
+    def show(label, xs):
+        if xs:
+            print(f"  {label:34} min {min(xs) * 1000:7.1f} ms   median {statistics.median(xs) * 1000:7.1f} ms")
+    show("network round trip (TCP connect)", rtts)
+    show("request on a warm connection", reqs)
+    if rtts and reqs:
+        rtt, req = min(rtts), min(reqs)
+        print(f"\n  ~{rtt * 1000:.0f} ms of every request is distance to the server, ~{max(0.0, req - rtt) * 1000:.0f} ms "
+              "is the server itself.")
+        print(f"  A timed run needs about two round trips on the clock (download, submit): >= ~{2 * rtt * 1000:.0f} ms "
+              "from here, plus server time.\n  Run this on Homebase too: whichever machine has the smaller round "
+              "trip should do the race.")
+    return 0
 
 
 def _resolve(gm: GameMaster, wanted: str) -> tuple[str | None, dict | None]:
@@ -308,6 +365,10 @@ def main(argv=None) -> int:
     p = sub.add_parser("status")
     p.add_argument("challenge")
     p.set_defaults(fn=cmd_status)
+
+    p = sub.add_parser("ping", help="measure network round trip vs server time to the Game Master")
+    p.add_argument("--count", type=int, default=7)
+    p.set_defaults(fn=cmd_ping)
 
     def gate_opts(p):
         p.add_argument("--min-confidence", type=float, default=DEFAULT_MIN_CONFIDENCE)

@@ -479,6 +479,13 @@ class AgainstFakeGameMaster(unittest.TestCase):
         (again,) = Archive(self.runs).runs("metadata-forensics-day-01-hash-to-ride/time_trial")
         self.assertEqual(again.challenge, "metadata-forensics-day-01-hash-to-ride/time_trial")
 
+    def test_ping_reports_round_trip_and_server_time(self):
+        fake, url = self._fake(seed=16)
+        code, out = self._cli(fake, url, "ping", "--count", "3")
+        self.assertEqual(code, 0, out)
+        self.assertIn("network round trip", out)
+        self.assertIn("warm connection", out)
+
     def test_race_on_timed_by_default_route(self):
         fake, url = self._fake(seed=14, timed_by_default=True)
         code, out = self._cli(fake, url, "race", CID, "--force", "--no-prompt")

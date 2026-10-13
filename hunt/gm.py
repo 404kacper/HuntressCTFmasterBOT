@@ -38,6 +38,7 @@ class Download:
     url: str  # final URL after redirects
     filename: str | None  # from Content-Disposition / URL, if the server told us
     seconds: float
+    redirects: int = 0  # each one may cost a fresh connection to another host
 
 
 _CD_FILENAME = re.compile(r"""filename\*?\s*=\s*(?:UTF-8'')?["']?([^"';]+)""", re.I)
@@ -165,7 +166,7 @@ class GameMaster:
             except ValueError:
                 data = r.text[:300]
             raise GMError(f"artifact download HTTP {r.status_code}: {_brief(data)}", r.status_code, data)
-        return Download(r.content, r.url, _filename(r), time.perf_counter() - t)
+        return Download(r.content, r.url, _filename(r), time.perf_counter() - t, len(r.history))
 
     def artifacts(self, challenge: str, downloads: list[str]) -> list[Download]:
         if len(downloads) <= 1:
