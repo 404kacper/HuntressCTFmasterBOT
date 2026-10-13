@@ -196,6 +196,15 @@ def cmd_ping(args) -> int:
             print(f"  tcp connect failed: {e}")
             break
     gm.warm(None)  # TLS + keep-alive set up, like race does
+    try:
+        r = gm.s.get(gm.base, params={"op": "openapi"}, timeout=gm.timeout)
+        hints = {k: v for k, v in r.headers.items() if k.lower() in (
+            "server", "via", "cf-ray", "x-vercel-id", "x-amz-cf-pop", "x-served-by", "fly-request-id",
+            "x-azure-ref", "x-cache", "x-powered-by", "x-envoy-upstream-service-time")}
+        if hints:
+            print("  hosting hints: " + "  ".join(f"{k}={v}" for k, v in hints.items()))
+    except Exception:
+        pass
     reqs = []
     for _ in range(args.count):
         t = time.perf_counter()
@@ -299,16 +308,41 @@ def cmd_race(args) -> int:
         print(f"note: this machine's clock is {abs(gm.clock_offset):.0f}s {'behind' if gm.clock_offset > 0 else 'ahead of'} "
               "the Game Master's; deadlines are judged on the server's clock")
     use_retry = True if args.retry else False if args.start else None  # None: start, or retry if finished
-    print(f"asking for a timed attempt; preparing it can take a while (up to {gm.prepare_timeout:.0f}s) "
-          "and does not count on the clock...", flush=True)
-    o = play(gm, archive, args.challenge, timed=True, use_retry=use_retry, submit=True,
-             min_confidence=args.min_confidence, partial=args.partial,
-             prompt=None if args.no_prompt else _human_prompt, trust_guessed_ids=args.trust_positional_ids)
-    _print_outcome(o, verbose=o.status != "submitted")
-    for key in ("hall_of_fame_eligible", "unique_attempts_remaining", "ranked_attempts_remaining"):
-        if o.attempt and key in o.attempt.raw:
-            print(f"{key}: {o.attempt.raw[key]}")
-    return _exit_code(o)
+    best: list[float] = []
+    code = 1
+    for i in range(max(1, args.repeat)):
+        if i:
+            time.sleep(args.gap)  # let CourseStack confirm the last solve before asking for the next variant
+            gm.warm(args.challenge)
+        print(f"{f'[{i + 1}/{args.repeat}] ' if args.repeat > 1 else ''}asking for a timed attempt; preparing it "
+              f"can take a while (up to {gm.prepare_timeout:.0f}s) and does not count on the clock...", flush=True)
+        o = play(gm, archive, args.challenge, timed=True, use_retry=use_retry, submit=True,
+                 min_confidence=args.min_confidence, partial=args.partial,
+                 prompt=None if args.no_prompt else _human_prompt, trust_guessed_ids=args.trust_positional_ids)
+        result = str((o.reply or {}).get("result") or "")
+        left = (o.attempt.raw.get("ranked_attempts_remaining") if o.attempt else None)
+        if o.status == "submitted" and result.upper() == "CORRECT":
+            t = o.timings
+            best.append(t.get("on-clock(approx)", 0.0))
+            print(f"  CORRECT  on-clock<= {best[-1] * 1000:.0f} ms  (download {t.get('download', 0) * 1000:.0f}, "
+                  f"solve {t.get('solve', 0) * 1000:.1f}, submit {t.get('submit', 0) * 1000:.0f} ms)  "
+                  f"ranked attempts left: {left if left is not None else '?'}   archived: {o.run.path if o.run else '-'}")
+            code = 0
+        else:
+            _print_outcome(o)
+            code = _exit_code(o)
+            break  # never keep spending ranked attempts after anything but a clean CORRECT
+        try:
+            if left is not None and int(left) <= args.keep:
+                print(f"stopping: {left} ranked attempt(s) left, keeping {args.keep} in reserve (--keep)")
+                break
+        except (TypeError, ValueError):
+            pass
+    if len(best) > 1:
+        print(f"\n{len(best)} CORRECT timed runs; fastest on-clock<= {min(best) * 1000:.0f} ms "
+              f"(the leaderboard keeps your best; its clock stops before the submit reply returns, "
+              "so it shows less than these numbers)")
+    return code
 
 
 def _exit_code(o: Outcome) -> int:
@@ -438,6 +472,12 @@ def main(argv=None) -> int:
     p.add_argument("--force", action="store_true", help="skip the regression requirement")
     p.add_argument("--wait", type=float, default=180.0,
                    help="seconds to wait for the Game Master to prepare the attempt (default 180)")
+    p.add_argument("--repeat", type=int, default=1,
+                   help="run this many timed attempts back to back (each spends a ranked attempt; "
+                        "stops at the first result that is not CORRECT)")
+    p.add_argument("--keep", type=int, default=3,
+                   help="with --repeat: stop when only this many ranked attempts are left (default 3)")
+    p.add_argument("--gap", type=float, default=3.0, help="with --repeat: seconds between runs (default 3)")
     p.add_argument("--no-prompt", action="store_true")
     gate_opts(p)
     p.set_defaults(fn=cmd_race)

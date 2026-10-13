@@ -129,6 +129,7 @@ class FakeGM:
         # (http://10.0.0.219/huntress-ctf-proxy). root_links: hand out download
         # links like '/artifact/<id>', which only work on the direct host.
         self.proxy_prefix, self.root_links = proxy_prefix.rstrip("/"), root_links
+        self.ranked_left = 32  # like ranked_attempts_remaining in live replies
         self.timed_by_default, self.time_limit = timed_by_default, time_limit
         self.prepare_delay = prepare_delay  # the real server can take a while to prepare a variant
         self.rng = random.Random(seed)
@@ -144,6 +145,8 @@ class FakeGM:
         v = make_variant(self.rng, self.mode)
         ids = {q["id"]: (secrets.token_hex(6) if self.opaque else q["id"]) for q in v.questions}
         deadline = datetime.now(timezone.utc) + timedelta(seconds=self.time_limit) if timed else None
+        if timed:
+            self.ranked_left -= 1
         self.attempt = _Attempt(secrets.token_hex(8), v, timed, deadline, ids)
         self.history.append(self.attempt)
         return self.attempt
@@ -155,7 +158,7 @@ class FakeGM:
              "answer_ids": list(a.answer_ids.values()),
              "download": f"/artifact/{a.id}" if self.root_links else f"?op=artifact&challenge={CID}",
              "artifact_sha256": hashlib.sha256(a.variant.zip_bytes).hexdigest(),
-             "unique_attempts_remaining": 5}
+             "unique_attempts_remaining": 5, "ranked_attempts_remaining": self.ranked_left}
         if a.deadline:
             d["deadline"] = a.deadline.isoformat().replace("+00:00", "Z")
             d["hall_of_fame_eligible"] = True

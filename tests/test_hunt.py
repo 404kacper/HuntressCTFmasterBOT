@@ -551,6 +551,33 @@ class AgainstFakeGameMaster(unittest.TestCase):
         self.assertEqual(code, 4, out)
         self.assertIn("NOT SOLVED", out)
 
+    def test_race_repeat_runs_fresh_attempts(self):
+        fake, url = self._fake(seed=26)
+        code, out = self._cli(fake, url, "race", CID, "--force", "--no-prompt", "--repeat", "3", "--gap", "0")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.count("CORRECT  on-clock"), 3)
+        self.assertEqual([a.state for a in fake.history], ["solved"] * 3)
+        self.assertTrue(all(a.timed for a in fake.history))
+
+    def test_race_repeat_stops_at_the_first_bad_result_and_keeps_a_reserve(self):
+        fake, url = self._fake(seed=27)
+        orig, calls = fake._submit, []
+
+        def flaky(answers):
+            calls.append(1)
+            return orig(answers) if len(calls) < 2 else (200, {"result": "incorrect"})
+        fake._submit = flaky
+        code, out = self._cli(fake, url, "race", CID, "--force", "--no-prompt", "--repeat", "5", "--gap", "0")
+        self.assertEqual(code, 4, out)
+        self.assertEqual(len(fake.history), 2)
+        fake2, url2 = self._fake(seed=28)
+        fake2.ranked_left = 10
+        code, out = self._cli(fake2, url2, "race", CID, "--force", "--no-prompt", "--repeat", "5", "--gap", "0",
+                              "--keep", "8")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(fake2.history), 2)
+        self.assertIn("keeping 8 in reserve", out)
+
     def test_ping_reports_round_trip_and_server_time(self):
         fake, url = self._fake(seed=16)
         code, out = self._cli(fake, url, "ping", "--count", "3")
