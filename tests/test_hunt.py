@@ -479,6 +479,19 @@ class AgainstFakeGameMaster(unittest.TestCase):
         (again,) = Archive(self.runs).runs("metadata-forensics-day-01-hash-to-ride/time_trial")
         self.assertEqual(again.challenge, "metadata-forensics-day-01-hash-to-ride/time_trial")
 
+    def test_slow_preparation_is_waited_for(self):
+        fake, url = self._fake(seed=17, prepare_delay=1.0)
+        gm = GameMaster(url, fake.token, timeout=0.3, prepare_timeout=5.0)
+        o = play(gm, Archive(self.runs), CID, timed=True, use_retry=None, submit=True)
+        self.assertEqual((o.status, (o.reply or {}).get("result")), ("submitted", "CORRECT"))
+        self.assertLess(o.timings["on-clock(approx)"], 1.0)  # the preparation wait is not counted
+        fake2, url2 = self._fake(seed=18, prepare_delay=1.0)
+        gm2 = GameMaster(url2, fake2.token, timeout=0.3, prepare_timeout=0.3)
+        o2 = play(gm2, Archive(self.runs), CID, timed=True, use_retry=None, submit=True)
+        self.assertEqual(o2.status, "gm-error")
+        self.assertIn("hunt status", o2.message)
+        self.assertIn("start", o2.message)
+
     def test_ping_reports_round_trip_and_server_time(self):
         fake, url = self._fake(seed=16)
         code, out = self._cli(fake, url, "ping", "--count", "3")

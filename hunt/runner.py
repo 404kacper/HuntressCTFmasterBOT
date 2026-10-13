@@ -58,8 +58,13 @@ def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_r
                 t0 = clock()
                 data = gm.retry(challenge, run_for_time=rft)
     except GMError as e:
+        if e.transport and timed:
+            return Outcome("gm-error", f"no reply from the Game Master: {e}. It may still have opened a timed "
+                           f"attempt: check with `py -m hunt status {challenge}`; running race again reconnects "
+                           "to it if it is still running.", reply=e.data)
         return Outcome("gm-error", f"the Game Master refused: {e}", reply=e.data)
     t["start"] = clock() - t0
+    t_ready = clock()  # the server's clock starts about now, once the material is ready
     attempt = Attempt.from_response(challenge, data)
 
     if not attempt.downloads and (attempt.result or not attempt.questions):
@@ -114,6 +119,8 @@ def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_r
                            "before doing anything else; do not resubmit blindly.")
         t["submit"] = clock() - t3
     t["start->submit-reply"] = clock() - t0
+    if sent:
+        t["on-clock(approx)"] = clock() - t_ready
 
     # ---- off the clock ----------------------------------------------------
     try:

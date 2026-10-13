@@ -16,6 +16,7 @@ import json
 import random
 import secrets
 import threading
+import time
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -121,9 +122,11 @@ class _Attempt:
 
 class FakeGM:
     def __init__(self, token: str = "rehearsal-token", mode: str = "trio", seed: int = 1,
-                 opaque_ids: bool = False, timed_by_default: bool = False, time_limit: float = 30.0):
+                 opaque_ids: bool = False, timed_by_default: bool = False, time_limit: float = 30.0,
+                 prepare_delay: float = 0.0):
         self.token, self.mode, self.opaque = token, mode, opaque_ids
         self.timed_by_default, self.time_limit = timed_by_default, time_limit
+        self.prepare_delay = prepare_delay  # the real server can take a while to prepare a variant
         self.rng = random.Random(seed)
         self.attempt: _Attempt | None = None
         self.history: list[_Attempt] = []
@@ -132,6 +135,8 @@ class FakeGM:
 
     # ---- game logic ---------------------------------------------------------
     def _new(self, timed: bool) -> _Attempt:
+        if self.prepare_delay:
+            time.sleep(self.prepare_delay)
         v = make_variant(self.rng, self.mode)
         ids = {q["id"]: (secrets.token_hex(6) if self.opaque else q["id"]) for q in v.questions}
         deadline = datetime.now(timezone.utc) + timedelta(seconds=self.time_limit) if timed else None

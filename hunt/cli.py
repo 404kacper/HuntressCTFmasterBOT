@@ -34,6 +34,7 @@ from . import config
 from .config import ConfigError
 from .gate import DEFAULT_MIN_CONFIDENCE, decide
 from .gm import GameMaster, GMError
+from .model import Attempt
 from .runner import Outcome, play
 from .solvers import solve
 
@@ -47,6 +48,13 @@ def _utf8_stdio() -> None:
 
 
 def _gm(args) -> GameMaster:
+    gm = _make_gm(args)
+    if getattr(args, "wait", None):
+        gm.prepare_timeout = args.wait
+    return gm
+
+
+def _make_gm(args) -> GameMaster:
     token = config.load_token()
     if token is None and not (args.url or os.environ.get("HUNTRESS_GM_URL") or os.environ.get("GM")) \
             and sys.stdin.isatty():
@@ -142,7 +150,22 @@ def cmd_status(args) -> int:
     cid, _ = _resolve(gm, args.challenge)
     if cid is None:
         return 2
-    print(json.dumps(gm.status(cid), indent=2, ensure_ascii=False))
+    data = gm.status(cid)
+    if args.json:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        return 0
+    a = Attempt.from_response(cid, data) if isinstance(data, dict) else None
+    print(f"challenge: {cid}")
+    if a is not None:
+        left = a.seconds_left()
+        print(f"  attempt:   {a.attempt_id or '?'}   result: {a.result or '(open)'}")
+        print(f"  timed:     {'yes, deadline ' + a.deadline.isoformat() if a.timed else 'no'}"
+              + (f"  ({left:.0f}s left)" if left is not None and left > 0 else "  (deadline passed)" if a.timed else ""))
+        for key in ("run_for_time", "hall_of_fame_eligible", "ranked_attempts_remaining",
+                    "regular_variants_remaining", "unique_attempts_remaining", "variant_fresh", "status"):
+            if key in data:
+                print(f"  {key}: {data[key]}")
+    print("(full reply: add --json)")
     return 0
 
 
@@ -273,6 +296,8 @@ def cmd_race(args) -> int:
         print(f"regression: {len(rows)} archived CORRECT attempt(s) reproduce.")
     gm.warm(args.challenge, tuple(_known_artifact_hosts(archive, args.challenge)))
     use_retry = True if args.retry else False if args.start else None  # None: start, or retry if finished
+    print(f"asking for a timed attempt; preparing it can take a while (up to {gm.prepare_timeout:.0f}s) "
+          "and does not count on the clock...", flush=True)
     o = play(gm, archive, args.challenge, timed=True, use_retry=use_retry, submit=True,
              min_confidence=args.min_confidence, partial=args.partial,
              prompt=None if args.no_prompt else _human_prompt, trust_guessed_ids=args.trust_positional_ids)
@@ -364,6 +389,7 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("status")
     p.add_argument("challenge")
+    p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_status)
 
     p = sub.add_parser("ping", help="measure network round trip vs server time to the Game Master")
@@ -394,6 +420,8 @@ def main(argv=None) -> int:
                      help="only send start (by default: start, then retry if that attempt is already finished)")
     how.add_argument("--retry", action="store_true", help="only send retry")
     p.add_argument("--force", action="store_true", help="skip the regression requirement")
+    p.add_argument("--wait", type=float, default=180.0,
+                   help="seconds to wait for the Game Master to prepare the attempt (default 180)")
     p.add_argument("--no-prompt", action="store_true")
     gate_opts(p)
     p.set_defaults(fn=cmd_race)

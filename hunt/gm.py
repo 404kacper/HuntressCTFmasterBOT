@@ -27,9 +27,10 @@ class GMError(RuntimeError):
         self.transport = transport  # True: we never got an answer (timeout, reset, ...)
 
 
-def _transport_error(e: Exception) -> GMError:
+def _transport_error(e: Exception, what: str = "", seconds: float | None = None) -> GMError:
     # Only the type name: some requests errors embed header values (the token).
-    return GMError(f"network error: {type(e).__name__}", transport=True)
+    detail = f" after {seconds:.1f}s" if seconds is not None else ""
+    return GMError(f"network error: {type(e).__name__}{detail}{' (' + what + ')' if what else ''}", transport=True)
 
 
 @dataclass
@@ -54,13 +55,16 @@ def _brief(data) -> str:
 
 class GameMaster:
     def __init__(self, base_url: str | None = None, token: str | None = None,
-                 timeout: float = 20.0):
+                 timeout: float = 20.0, prepare_timeout: float = 180.0):
         if token is None:
             token = config.load_token()
         self.base = base_url or config.base_url(token)
         parts = urlsplit(self.base)
         self.scheme, self.host = parts.scheme, parts.netloc
         self.timeout = timeout
+        # start/retry can wait while the Game Master prepares a fresh variant;
+        # that wait is not on the clock, so give it room instead of giving up.
+        self.prepare_timeout = prepare_timeout
         s = requests.Session()
         s.trust_env = config.proxy_env_present()
         adapter = HTTPAdapter(pool_connections=4, pool_maxsize=8, max_retries=0)
@@ -93,12 +97,15 @@ class GameMaster:
             raise _transport_error(e) from None
         return self._decode(r)
 
-    def post(self, body: dict, **params):
+    def post(self, body: dict, timeout: float | None = None, **params):
         params = {k: v for k, v in params.items() if v is not None}
+        what = str(body.get("op") or ("submit" if "answers" in body else "start"))
+        t = time.perf_counter()
         try:
-            r = self.s.post(self.base, params=params or None, json=body, timeout=self.timeout)
+            r = self.s.post(self.base, params=params or None, json=body,
+                            timeout=(min(10.0, self.timeout), timeout or self.timeout))
         except requests.RequestException as e:
-            raise _transport_error(e) from None
+            raise _transport_error(e, what, time.perf_counter() - t) from None
         return self._decode(r)
 
     def warm(self, challenge: str | None = None, extra_urls: tuple[str, ...] = ()) -> None:
@@ -131,16 +138,16 @@ class GameMaster:
         body: dict = {"challenge": challenge}
         if run_for_time is not None:
             body = {"op": "start", "challenge": challenge, "run_for_time": bool(run_for_time)}
-        return self.post(body)
+        return self.post(body, timeout=self.prepare_timeout)
 
     def retry(self, challenge: str, run_for_time: bool | None = None) -> dict:
         body: dict = {"op": "retry", "challenge": challenge}
         if run_for_time is not None:
             body["run_for_time"] = bool(run_for_time)
-        return self.post(body)
+        return self.post(body, timeout=self.prepare_timeout)
 
     def practice(self, challenge: str) -> dict:
-        return self.post({"op": "practice", "challenge": challenge})
+        return self.post({"op": "practice", "challenge": challenge}, timeout=self.prepare_timeout)
 
     def submit(self, challenge: str, answers: dict[str, str]) -> dict:
         # Every answer goes over the wire as a string ("240", not 240).
