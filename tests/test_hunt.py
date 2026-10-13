@@ -449,6 +449,24 @@ class AgainstFakeGameMaster(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual((fake2.attempt.timed, fake2.attempt.state, len(fake2.history)), (True, "solved", 2))
 
+    def test_challenge_name_works_like_the_id(self):
+        fake, url = self._fake(seed=15)
+        code, out = self._cli(fake, url, "solve", "You Must Be This Hash to Ride")
+        self.assertEqual(code, 0, out)
+        self.assertIn(CID, out)
+        self.assertEqual(fake.attempt.state, "active")  # dry run: started, nothing sent
+
+    def test_ambiguous_or_unknown_name_lists_ids(self):
+        rows = [{"id": f"metadata-forensics-day-01-hash-to-ride{sfx}", "name": "\U0001F50E You Must Be This Hash to Ride",
+                 "run_for_time_supported": True} for sfx in ("", "-time-trial", "-mastery")]
+        gm = mock.Mock(list=mock.Mock(return_value=rows))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(cli._resolve(gm, "You Must Be This Hash to Ride"), (None, None))
+            self.assertEqual(cli._resolve(gm, "hash to ride time trial")[0], rows[1]["id"])
+            self.assertEqual(cli._resolve(gm, "nothing like it"), (None, None))
+        self.assertEqual(out.getvalue().count("-mastery"), 2)
+
     def test_race_on_timed_by_default_route(self):
         fake, url = self._fake(seed=14, timed_by_default=True)
         code, out = self._cli(fake, url, "race", CID, "--force", "--no-prompt")

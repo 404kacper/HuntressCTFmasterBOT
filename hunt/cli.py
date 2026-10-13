@@ -17,6 +17,7 @@ import argparse
 import getpass
 import json
 import os
+import re
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -128,21 +129,53 @@ def cmd_openapi(args) -> int:
 
 
 def cmd_status(args) -> int:
-    print(json.dumps(_gm(args).status(args.challenge), indent=2, ensure_ascii=False))
+    gm = _gm(args)
+    cid, _ = _resolve(gm, args.challenge)
+    if cid is None:
+        return 2
+    print(json.dumps(gm.status(cid), indent=2, ensure_ascii=False))
     return 0
 
 
-def _route(gm: GameMaster, cid: str) -> dict | None:
+def _norm(text) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(text).lower()).strip()
+
+
+def _resolve(gm: GameMaster, wanted: str) -> tuple[str | None, dict | None]:
+    """Accept a challenge id or its display name. Returns (id, list entry);
+    id is None when the choice is ambiguous or unknown (and says why)."""
     try:
-        return next((r for r in gm.list() if r.get("id") == cid), None)
-    except GMError:
-        return None
+        rows = gm.list()
+    except GMError as e:
+        print(f"(could not list challenges: {e}; using {wanted!r} as the id)")
+        return wanted, None
+    for r in rows:
+        if r.get("id") == wanted:
+            return wanted, r
+    key = _norm(wanted)
+    hits = [r for r in rows if key and _norm(r.get("name", "")) == key] or \
+           [r for r in rows if key and key in _norm(r.get("name", "")) + " " + _norm(r.get("id", ""))]
+    if len(hits) == 1:
+        print(f"'{wanted}' -> challenge id {hits[0]['id']}")
+        return hits[0]["id"], hits[0]
+    if hits:
+        print(f"'{wanted}' matches several challenges. Pick one id and run the command again with it:")
+    else:
+        print(f"no challenge called '{wanted}'. Challenge ids look like this (from `py -m hunt list`):")
+        hits = rows[:15]
+    for r in hits:
+        mode = "untimed start" if r.get("run_for_time_supported") else "START IS TIMED"
+        print(f"  {r.get('id')}    ({r.get('name', '')}, {mode})")
+    return None, None
 
 
 def cmd_solve(args) -> int:
     gm = _gm(args)
+    cid, route = _resolve(gm, args.challenge)
+    if cid is None:
+        return 2
+    args.challenge = cid
     if not args.accept_timer:
-        route = _route(gm, args.challenge)
         if route is None or not route.get("run_for_time_supported"):
             print(f"refusing to {'retry' if args.retry else 'start'}: this route is not listed with "
                   "run_for_time_supported=true, so it may begin a real countdown. Check `hunt list`, "
@@ -157,6 +190,11 @@ def cmd_solve(args) -> int:
 
 def cmd_race(args) -> int:
     archive = Archive(args.runs)
+    gm = _gm(args)
+    cid, _ = _resolve(gm, args.challenge)
+    if cid is None:
+        return 2
+    args.challenge = cid
     if not args.force:
         rows = replay(archive, args.challenge, args.min_confidence, args.trust_positional_ids)
         if not rows:
@@ -176,7 +214,6 @@ def cmd_race(args) -> int:
                 print(f"  {r['run']}: {json.dumps(r['diffs'])}")
             return 3
         print(f"regression: {len(rows)} archived CORRECT attempt(s) reproduce.")
-    gm = _gm(args)
     gm.warm(args.challenge, tuple(_known_artifact_hosts(archive, args.challenge)))
     use_retry = True if args.retry else False if args.start else None  # None: start, or retry if finished
     o = play(gm, archive, args.challenge, timed=True, use_retry=use_retry, submit=True,
