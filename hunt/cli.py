@@ -278,6 +278,12 @@ def cmd_solve(args) -> int:
 
 
 def cmd_race(args) -> int:
+    if args.repeat < 1 or args.gap < 0 or args.keep < 0 or args.pending_wait < 0:
+        print("--repeat must be at least 1; --gap, --keep and --pending-wait cannot be negative")
+        return 2
+    if args.start and args.repeat > 1:
+        print("--start reconnects to the same attempt every time, so it cannot be combined with --repeat")
+        return 2
     archive = Archive(args.runs)
     gm = _gm(args)
     cid, _ = _resolve(gm, args.challenge)
@@ -308,41 +314,101 @@ def cmd_race(args) -> int:
         print(f"note: this machine's clock is {abs(gm.clock_offset):.0f}s {'behind' if gm.clock_offset > 0 else 'ahead of'} "
               "the Game Master's; deadlines are judged on the server's clock")
     use_retry = True if args.retry else False if args.start else None  # None: start, or retry if finished
+    if args.repeat > 1:
+        try:
+            left = _ranked_left(gm.status(args.challenge))
+        except GMError:
+            left = None
+        if left is None:
+            print("refusing --repeat: cannot read ranked_attempts_remaining, so the reserve (--keep) cannot "
+                  "be protected. Run single races instead.")
+            return 2
+        if left <= args.keep:
+            print(f"refusing --repeat: {left} ranked attempt(s) left and --keep is {args.keep}")
+            return 2
+    refuse: set[str] = set()  # attempts solved in this session; seeing one again means 'not advanced yet'
     best: list[float] = []
     code = 1
-    for i in range(max(1, args.repeat)):
+    for i in range(args.repeat):
         if i:
-            time.sleep(args.gap)  # let CourseStack confirm the last solve before asking for the next variant
+            time.sleep(args.gap)
             gm.warm(args.challenge)
         print(f"{f'[{i + 1}/{args.repeat}] ' if args.repeat > 1 else ''}asking for a timed attempt; preparing it "
               f"can take a while (up to {gm.prepare_timeout:.0f}s) and does not count on the clock...", flush=True)
-        o = play(gm, archive, args.challenge, timed=True, use_retry=use_retry, submit=True,
-                 min_confidence=args.min_confidence, partial=args.partial,
-                 prompt=None if args.no_prompt else _human_prompt, trust_guessed_ids=args.trust_positional_ids)
+        o = _play_through_pending(gm, archive, args, use_retry, refuse)
         result = str((o.reply or {}).get("result") or "")
-        left = (o.attempt.raw.get("ranked_attempts_remaining") if o.attempt else None)
-        if o.status == "submitted" and result.upper() == "CORRECT":
-            t = o.timings
-            best.append(t.get("on-clock(approx)", 0.0))
-            print(f"  CORRECT  on-clock<= {best[-1] * 1000:.0f} ms  (download {t.get('download', 0) * 1000:.0f}, "
-                  f"solve {t.get('solve', 0) * 1000:.1f}, submit {t.get('submit', 0) * 1000:.0f} ms)  "
-                  f"ranked attempts left: {left if left is not None else '?'}   archived: {o.run.path if o.run else '-'}")
-            code = 0
-        else:
+        if o.status == "pending":
+            print(f"stopping: {o.message}")
+            code = 0 if best else 1
+            break
+        if not (o.status == "submitted" and result.upper() == "CORRECT"):
             _print_outcome(o)
             code = _exit_code(o)
             break  # never keep spending ranked attempts after anything but a clean CORRECT
-        try:
-            if left is not None and int(left) <= args.keep:
-                print(f"stopping: {left} ranked attempt(s) left, keeping {args.keep} in reserve (--keep)")
-                break
-        except (TypeError, ValueError):
-            pass
+        code = 0
+        if o.attempt:
+            if o.attempt.attempt_id:
+                refuse.add(o.attempt.attempt_id)
+            refuse |= o.attempt.expected_sha256
+        t = o.timings
+        best.append(t.get("on-clock(approx)", 0.0))
+        if args.repeat == 1:
+            _print_outcome(o, verbose=False)
+            for key in ("hall_of_fame_eligible", "unique_attempts_remaining", "ranked_attempts_remaining"):
+                if o.attempt and key in o.attempt.raw:
+                    print(f"{key}: {o.attempt.raw[key]}")
+            break
+        left = _ranked_left(o.attempt.raw if o.attempt else {})
+        print(f"  CORRECT  on-clock<= {best[-1] * 1000:.0f} ms  (download {t.get('download', 0) * 1000:.0f}, "
+              f"solve {t.get('solve', 0) * 1000:.1f}, submit {t.get('submit', 0) * 1000:.0f} ms)  "
+              f"ranked attempts left: {left if left is not None else '?'}   archived: {o.run.path if o.run else '-'}")
+        if o.message:
+            print(f"  note: {o.message}")
+        if o.run is None:
+            print("stopping: this run could not be archived, so further runs would not be saved either")
+            break
+        if o.attempt and o.attempt.raw.get("hall_of_fame_eligible") is False:
+            print("stopping: the Game Master says this attempt is not Hall of Fame eligible")
+            break
+        if left is None:
+            print("stopping: cannot read ranked_attempts_remaining, so the reserve (--keep) cannot be protected")
+            break
+        if left <= args.keep and i + 1 < args.repeat:
+            print(f"stopping: {left} ranked attempt(s) left, keeping {args.keep} in reserve (--keep)")
+            break
     if len(best) > 1:
         print(f"\n{len(best)} CORRECT timed runs; fastest on-clock<= {min(best) * 1000:.0f} ms "
-              f"(the leaderboard keeps your best; its clock stops before the submit reply returns, "
+              "(the leaderboard keeps your best; its clock stops before the submit reply returns, "
               "so it shows less than these numbers)")
     return code
+
+
+def _play_through_pending(gm: GameMaster, archive: Archive, args, use_retry, refuse: set[str]) -> Outcome:
+    """Run one timed attempt; if the Game Master has not yet advanced past the
+    last solve (scoring still being confirmed), wait with backoff and ask again."""
+    waited, delay = 0.0, 2.0
+    while True:
+        o = play(gm, archive, args.challenge, timed=True, use_retry=use_retry, submit=True,
+                 min_confidence=args.min_confidence, partial=args.partial,
+                 prompt=None if args.no_prompt else _human_prompt, trust_guessed_ids=args.trust_positional_ids,
+                 refuse=refuse)
+        if o.status != "pending" or waited >= args.pending_wait:
+            return o
+        print(f"  {o.message}; asking again in {delay:.0f}s", flush=True)
+        time.sleep(delay)
+        waited += delay
+        delay = min(delay * 2, 16.0)
+
+
+def _ranked_left(raw) -> int | None:
+    v = raw.get("ranked_attempts_remaining") if isinstance(raw, dict) else None
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int) and v >= 0:
+        return v
+    if isinstance(v, str) and v.isdigit():
+        return int(v)
+    return None
 
 
 def _exit_code(o: Outcome) -> int:
@@ -478,6 +544,8 @@ def main(argv=None) -> int:
     p.add_argument("--keep", type=int, default=3,
                    help="with --repeat: stop when only this many ranked attempts are left (default 3)")
     p.add_argument("--gap", type=float, default=3.0, help="with --repeat: seconds between runs (default 3)")
+    p.add_argument("--pending-wait", type=float, default=60.0,
+                   help="how long to keep asking while the last solve is still being confirmed (default 60s)")
     p.add_argument("--no-prompt", action="store_true")
     gate_opts(p)
     p.set_defaults(fn=cmd_race)

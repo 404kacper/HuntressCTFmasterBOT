@@ -27,7 +27,7 @@ Prompt = Callable[[Attempt, Decision, Solution], str]
 
 @dataclass
 class Outcome:
-    status: str  # submitted | dry-run | held | no-artifact | wrong-artifact | gm-error
+    status: str  # submitted | dry-run | held | no-artifact | wrong-artifact | not-timed | pending | gm-error
     message: str = ""
     attempt: Attempt | None = None
     solution: Solution | None = None
@@ -41,30 +41,40 @@ class Outcome:
 
 def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_retry: bool | None,
          submit: bool, min_confidence: float = DEFAULT_MIN_CONFIDENCE, partial: bool = False,
-         prompt: Prompt | None = None, trust_guessed_ids: bool = False) -> Outcome:
+         prompt: Prompt | None = None, trust_guessed_ids: bool = False,
+         refuse: set[str] | None = None) -> Outcome:
     """use_retry: True sends op=retry, False sends start. None (auto) sends
     start, and if that only reconnects to a finished attempt, follows with
-    retry. Reconnecting starts no clock, so the extra request costs no time."""
+    retry. Reconnecting starts no clock, so the extra request costs no time.
+
+    refuse: attempt ids / artifact sha256s already solved in this session;
+    getting one of them back means retry has not advanced yet ('pending')."""
     load_handlers()  # imports happen before the clock, not on it
     clock = time.perf_counter
     t: dict[str, float] = {}
     rft = True if timed else None
     t0 = clock()
+    retried = False
     try:
         if use_retry:
             data = gm.retry(challenge, run_for_time=rft)
+            retried = True
         else:
             data = gm.start(challenge, run_for_time=rft)
             if use_retry is None and _finished(challenge, data, gm.server_now()):
                 t_start = clock()
                 try:
                     data = gm.retry(challenge, run_for_time=rft)
-                    t0 = t_start
+                    retried, t0 = True, t_start
                 except GMError as e:
-                    # "Finish the current attempt first": the server says it is still live, so our
-                    # deadline arithmetic was wrong. Carry on with the attempt start gave us.
-                    if e.transport or e.status != 409 or _server_says_finished(data):
+                    if e.transport or e.status != 409:
                         raise
+                    if _server_says_finished(data):
+                        # Retry refused on a solved attempt: its scoring is not confirmed yet.
+                        return Outcome("pending", f"retry refused for now ({e}); the last solve is probably "
+                                       "still awaiting confirmation", Attempt.from_response(challenge, data))
+                    # Otherwise the server says the attempt is still live, so our deadline
+                    # arithmetic was wrong: carry on with the attempt start gave us.
     except GMError as e:
         if e.transport and timed:
             return Outcome("gm-error", f"no reply from the Game Master: {e}. It may still have opened a timed "
@@ -74,6 +84,13 @@ def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_r
     t["start"] = clock() - t0
     t_ready = clock()  # the server's clock starts about now, once the material is ready
     attempt = Attempt.from_response(challenge, data)
+
+    if retried and _server_says_finished(data):
+        return Outcome("pending", "retry handed back the attempt that is already solved; its scoring is "
+                       "probably still awaiting confirmation", attempt, timings=t)
+    if refuse and ((attempt.attempt_id and attempt.attempt_id in refuse) or attempt.expected_sha256 & refuse):
+        return Outcome("pending", "the Game Master handed back an attempt this session already solved",
+                       attempt, timings=t)
 
     if not attempt.downloads and (attempt.result or not attempt.questions):
         run = _archive(archive, attempt, data, [], None, None, None, None)

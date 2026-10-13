@@ -118,18 +118,23 @@ class _Attempt:
     answer_ids: dict[str, str]  # question id -> answer id
     accepted: set[str] = field(default_factory=set)
     state: str = "active"  # active | solved | failed | expired
+    solved_at: float = 0.0
 
 
 class FakeGM:
     def __init__(self, token: str = "rehearsal-token", mode: str = "trio", seed: int = 1,
                  opaque_ids: bool = False, timed_by_default: bool = False, time_limit: float = 30.0,
-                 prepare_delay: float = 0.0, proxy_prefix: str = "", root_links: bool = False):
+                 prepare_delay: float = 0.0, proxy_prefix: str = "", root_links: bool = False,
+                 pending_for: float = 0.0):
         self.token, self.mode, self.opaque = token, mode, opaque_ids
         # proxy_prefix: serve the API only under a path, like the Homebase proxy
         # (http://10.0.0.219/huntress-ctf-proxy). root_links: hand out download
         # links like '/artifact/<id>', which only work on the direct host.
         self.proxy_prefix, self.root_links = proxy_prefix.rstrip("/"), root_links
         self.ranked_left = 32  # like ranked_attempts_remaining in live replies
+        # Seconds after a solve during which retry hands back the solved attempt
+        # ("if scoring is still pending, that attempt stays in place until confirmation").
+        self.pending_for = pending_for
         self.timed_by_default, self.time_limit = timed_by_default, time_limit
         self.prepare_delay = prepare_delay  # the real server can take a while to prepare a variant
         self.rng = random.Random(seed)
@@ -153,7 +158,8 @@ class FakeGM:
 
     def _view(self, a: _Attempt) -> dict:
         if a.state == "solved":
-            return {"result": "CORRECT", "solved_by": {"name": "rehearsal"}, "questions": a.variant.questions}
+            return {"result": "CORRECT", "solved_by": {"name": "rehearsal"}, "questions": a.variant.questions,
+                    "ranked_attempts_remaining": self.ranked_left}
         d = {"challenge": CID, "attempt_id": a.id, "questions": a.variant.questions,
              "answer_ids": list(a.answer_ids.values()),
              "download": f"/artifact/{a.id}" if self.root_links else f"?op=artifact&challenge={CID}",
@@ -181,7 +187,8 @@ class FakeGM:
             if method == "GET" and op == "openapi":
                 return 200, {"openapi": "3.1.0", "info": {"title": "fake Game Master"}}
             if method == "GET" and op == "status":
-                return 200, self._view(self.attempt) if self.attempt else {"status": "not_started"}
+                return 200, (self._view(self.attempt) if self.attempt else
+                             {"status": "not_started", "ranked_attempts_remaining": self.ranked_left})
             if method != "POST":
                 return 400, {"error": f"unknown op {op!r}"}
             if body.get("challenge") != CID:
@@ -197,6 +204,8 @@ class FakeGM:
             if op == "retry":
                 if a and a.state == "active" and not self._expired(a):
                     return 409, {"error": "finish the current attempt before retrying"}
+                if a and a.state == "solved" and time.monotonic() - a.solved_at < self.pending_for:
+                    return 200, self._view(a)  # stays in place until scoring is confirmed
                 return 200, self._view(self._new(bool(body.get("run_for_time")) or self.timed_by_default))
             return 400, {"error": f"unknown op {op!r}"}
 
@@ -224,6 +233,7 @@ class FakeGM:
         if remaining:
             return 200, {"result": "accepted", "remaining": remaining}
         a.state = "solved"
+        a.solved_at = time.monotonic()
         return 200, {"result": "CORRECT"}
 
     # ---- HTTP -------------------------------------------------------------

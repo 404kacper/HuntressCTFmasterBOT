@@ -578,6 +578,69 @@ class AgainstFakeGameMaster(unittest.TestCase):
         self.assertEqual(len(fake2.history), 2)
         self.assertIn("keeping 8 in reserve", out)
 
+    def _count_submits(self, fake):
+        orig, calls = fake._submit, []
+
+        def counting(answers):
+            calls.append(fake.attempt.id)
+            return orig(answers)
+        fake._submit = counting
+        return calls
+
+    def test_repeat_waits_while_scoring_is_pending(self):
+        fake, url = self._fake(seed=29, pending_for=1.5)
+        submits = self._count_submits(fake)
+        code, out = self._cli(fake, url, "race", CID, "--force", "--no-prompt", "--repeat", "2", "--gap", "0")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.count("CORRECT  on-clock"), 2)
+        self.assertEqual(len(fake.history), 2)
+        self.assertEqual(len(submits), len(set(submits)))  # never re-submitted to a solved attempt
+
+    def test_repeat_gives_up_cleanly_when_pending_too_long(self):
+        fake, url = self._fake(seed=30, pending_for=100)
+        submits = self._count_submits(fake)
+        code, out = self._cli(fake, url, "race", CID, "--force", "--no-prompt", "--repeat", "3", "--gap", "0",
+                              "--pending-wait", "2")
+        self.assertEqual(code, 0, out)
+        self.assertIn("stopping:", out)
+        self.assertEqual((len(fake.history), len(submits)), (1, 1))
+
+    def test_repeat_refuses_without_a_readable_reserve(self):
+        fake, url = self._fake(seed=31)
+        fake.handle = (lambda orig: lambda m, q, b: (lambda c, d: (c, {k: v for k, v in d.items()
+                       if k != "ranked_attempts_remaining"}))(*orig(m, q, b)))(fake.handle)
+        code, out = self._cli(fake, url, "race", CID, "--force", "--no-prompt", "--repeat", "2", "--gap", "0")
+        self.assertEqual(code, 2, out)
+        self.assertEqual(fake.history, [])
+        fake2, url2 = self._fake(seed=32)
+        fake2.ranked_left = 3
+        code, out = self._cli(fake2, url2, "race", CID, "--force", "--no-prompt", "--repeat", "2", "--keep", "3")
+        self.assertEqual(code, 2, out)
+        self.assertEqual(fake2.history, [])
+
+    def test_repeat_stops_when_not_hall_of_fame_eligible(self):
+        fake, url = self._fake(seed=33)
+        orig = fake._view
+        fake._view = lambda a: {**orig(a), **({"hall_of_fame_eligible": False} if a.deadline else {})}
+        code, out = self._cli(fake, url, "race", CID, "--force", "--no-prompt", "--repeat", "3", "--gap", "0")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(fake.history), 1)
+        self.assertIn("not Hall of Fame eligible", out)
+
+    def test_repeat_argument_checks(self):
+        fake, url = self._fake(seed=34)
+        for argv in (["--start", "--repeat", "2"], ["--repeat", "0"], ["--gap", "-1", "--repeat", "2"]):
+            code, out = self._cli(fake, url, "race", CID, "--force", "--no-prompt", *argv)
+            self.assertEqual(code, 2, (argv, out))
+        self.assertEqual(fake.history, [])
+
+    def test_single_race_still_prints_the_full_reply(self):
+        fake, url = self._fake(seed=35)
+        code, out = self._cli(fake, url, "race", CID, "--force", "--no-prompt")
+        self.assertEqual(code, 0, out)
+        self.assertIn("sent 5 answer(s)", out)
+        self.assertIn("hall_of_fame_eligible", out)
+
     def test_ping_reports_round_trip_and_server_time(self):
         fake, url = self._fake(seed=16)
         code, out = self._cli(fake, url, "ping", "--count", "3")
