@@ -10,27 +10,45 @@ untimed (learn + prove)                          timed (race)
 hunt solve CID          dry run: see the         hunt race CID
                         questions, artifact,       regression must pass first
                         proposed answers           warm connection   (off the clock)
-   ↓ write/adjust a handler if needed              retry run_for_time ─┐
+   ↓ write/adjust a handler if needed              start/retry (timed) ┐
 hunt offline CID        re-solve archive, no net   download artifact   │ on the clock
 hunt solve CID --submit the real untimed submit    solve + gate        │ (~ms of compute,
    ↓ CORRECT → archived as ground truth            submit             ─┘  the rest is network)
 hunt replay CID         regression check           archive + inventory (off the clock)
 ```
 
-## Setup (Windows PowerShell)
+## Quick start: the timed hash challenge (Windows PowerShell)
 
 ```powershell
-py -m pip install requests
+# once
+git clone https://github.com/404kacper/HuntressCTFmasterBOT
 cd HuntressCTFmasterBOT
-# Read the token without echoing it or saving it to history:
-$s = Read-Host -AsSecureString "Game Master token"
-$env:HUNTRESS_GM_TOKEN = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($s))
+git checkout claude/huntress-ctf-solver-8n8edz
+py -m pip install requests
+
+# every time: find the challenge id
 py -m hunt list --day 1
+
+# practise with no clock (nothing is sent), then for real (still no clock)
+py -m hunt solve <challenge-id>
+py -m hunt solve <challenge-id> --submit
+
+# the timed run
+py -m hunt race <challenge-id>
 ```
 
-Or put the token in a file outside the repo and set `$env:HUNTRESS_GM_TOKEN_FILE`
-to its path. `HUNTRESS_GM_URL` (or `GM`, which your old script used) overrides the
-endpoint. With no token, the bot uses the Homebase proxy URL.
+If `solve` says the challenge is *already solved*, run `py -m hunt solve <challenge-id> --retry`
+for a fresh untimed copy, then `py -m hunt solve <challenge-id> --submit`. If `list`
+says **START IS TIMED**, there is no untimed copy: go straight to
+`py -m hunt race <challenge-id> --force`.
+
+## Token
+
+The bot reads `HUNTRESS_GM_TOKEN` (and `GM` or `HUNTRESS_GM_URL` for the endpoint, as
+`solution.py` did). If you set them with `setx`, there is nothing else to do: just
+open a new terminal afterwards, because `setx` does not change the window it runs in.
+Only if the variable is missing does the bot ask for the token, with hidden typing.
+`HUNTRESS_GM_TOKEN_FILE` (a path to a file holding the token) also works.
 
 ## The loop for a new challenge
 
@@ -49,9 +67,11 @@ endpoint. With no token, the bot uses the Homebase proxy URL.
 5. `py -m hunt solve CID --submit`: the real untimed submission. When it comes
    back CORRECT, the attempt becomes ground truth in `runs/`.
 6. `py -m hunt race CID`: replays every archived CORRECT attempt first and
-   refuses to race if the solver no longer reproduces them. Then it warms the
-   connection, retries with `run_for_time:true`, solves, submits and prints
-   the timings.
+   refuses to race if the solver no longer reproduces them (`--force` skips
+   this). Then it warms the connection and sends `start` with
+   `run_for_time:true`. If that only reconnects to a finished attempt, it
+   sends `retry` instead (reconnecting costs no clock time). Then it solves,
+   submits and prints the timings.
 
 Regular and timed attempts draw from separate artifact pools, but the question
 IDs and answer formats are stable by design. Proving a solver on the untimed

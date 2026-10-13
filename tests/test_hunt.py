@@ -13,6 +13,7 @@ import unittest
 import warnings
 import zipfile
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -429,6 +430,167 @@ class AgainstFakeGameMaster(unittest.TestCase):
         self.assertEqual(code, 3, out)
         self.assertIsNone(fake.attempt)
 
+    def test_race_auto_picks_start_or_retry(self):
+        # never started: start(run_for_time) opens the timed attempt
+        fake, url = self._fake(seed=12)
+        code, out = self._cli(fake, url, "race", CID, "--force", "--no-prompt")
+        self.assertEqual(code, 0, out)
+        self.assertEqual((fake.attempt.timed, fake.attempt.state), (True, "solved"))
+
+    def test_race_after_solving_with_another_script(self):
+        # solved earlier with solution.py (nothing archived): refusal explains, --force races via retry
+        fake2, url2 = self._fake(seed=13)
+        gm = GameMaster(url2, fake2.token)
+        gm.start(CID)
+        gm.submit(CID, fake2.attempt.variant.truth)
+        code, out = self._cli(fake2, url2, "race", CID, "--no-prompt")
+        self.assertEqual(code, 3, out)
+        self.assertIn("--force", out)
+        code, out = self._cli(fake2, url2, "race", CID, "--force", "--no-prompt")
+        self.assertEqual(code, 0, out)
+        self.assertEqual((fake2.attempt.timed, fake2.attempt.state, len(fake2.history)), (True, "solved", 2))
+
+    def test_challenge_name_works_like_the_id(self):
+        fake, url = self._fake(seed=15)
+        code, out = self._cli(fake, url, "solve", "You Must Be This Hash to Ride")
+        self.assertEqual(code, 0, out)
+        self.assertIn(CID, out)
+        self.assertEqual(fake.attempt.state, "active")  # dry run: started, nothing sent
+
+    def test_ambiguous_or_unknown_name_lists_ids(self):
+        rows = [{"id": f"metadata-forensics-day-01-hash-to-ride{sfx}", "name": "\U0001F50E You Must Be This Hash to Ride",
+                 "run_for_time_supported": True} for sfx in ("", "-time-trial", "-mastery")]
+        gm = mock.Mock(list=mock.Mock(return_value=rows))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(cli._resolve(gm, "You Must Be This Hash to Ride"), (None, None))
+            self.assertEqual(cli._resolve(gm, "hash to ride time trial")[0], rows[1]["id"])
+            self.assertEqual(cli._resolve(gm, "nothing like it"), (None, None))
+        self.assertEqual(out.getvalue().count("-mastery"), 2)
+
+    def test_finished_attempt_detected_even_with_a_download_link(self):
+        from hunt.runner import _finished
+        self.assertTrue(_finished(CID, {"result": "CORRECT", "download": "?op=artifact", "questions": LIVE_QS}))
+        self.assertTrue(_finished(CID, {"result": "expired", "download": "?op=artifact"}))
+        self.assertFalse(_finished(CID, {"download": "?op=artifact", "questions": LIVE_QS}))
+        self.assertTrue(_finished(CID, {"download": "/artifact/x", "deadline": "2026-01-01T00:00:00Z"}))
+        self.assertFalse(_finished(CID, {"download": "/artifact/x", "deadline": "2999-01-01T00:00:00Z"}))
+
+    def test_archive_keeps_ids_with_slashes(self):
+        run = Archive(self.runs).new_run("metadata-forensics-day-01-hash-to-ride/time_trial", "regular")
+        run.write_json("start.json", {})
+        (again,) = Archive(self.runs).runs("metadata-forensics-day-01-hash-to-ride/time_trial")
+        self.assertEqual(again.challenge, "metadata-forensics-day-01-hash-to-ride/time_trial")
+
+    def test_slow_preparation_is_waited_for(self):
+        fake, url = self._fake(seed=17, prepare_delay=1.0)
+        gm = GameMaster(url, fake.token, timeout=0.3, prepare_timeout=5.0)
+        o = play(gm, Archive(self.runs), CID, timed=True, use_retry=None, submit=True)
+        self.assertEqual((o.status, (o.reply or {}).get("result")), ("submitted", "CORRECT"))
+        self.assertLess(o.timings["on-clock(approx)"], 1.0)  # the preparation wait is not counted
+        fake2, url2 = self._fake(seed=18, prepare_delay=1.0)
+        gm2 = GameMaster(url2, fake2.token, timeout=0.3, prepare_timeout=0.3)
+        o2 = play(gm2, Archive(self.runs), CID, timed=True, use_retry=None, submit=True)
+        self.assertEqual(o2.status, "gm-error")
+        self.assertIn("hunt status", o2.message)
+        self.assertIn("start", o2.message)
+
+    def test_root_relative_links_behind_the_homebase_proxy(self):
+        # Live failure: '/artifact/x' resolved outside http://10.0.0.219/huntress-ctf-proxy and 404ed.
+        fake, url = self._fake(seed=19, root_links=True, proxy_prefix="/huntress-ctf-proxy")
+        self.assertTrue(url.endswith("/huntress-ctf-proxy"))
+        o = play(GameMaster(url, fake.token), Archive(self.runs), CID, timed=True, use_retry=None, submit=True)
+        self.assertEqual((o.status, (o.reply or {}).get("result")), ("submitted", "CORRECT"))
+        self.assertEqual(o.downloads[0].url.split("?")[0], url)  # went straight to op=artifact, no 404 first
+
+    def test_root_relative_links_on_the_direct_host(self):
+        fake, url = self._fake(seed=20, root_links=True)
+        o = play(GameMaster(url, fake.token), Archive(self.runs), CID, timed=True, use_retry=None, submit=True)
+        self.assertEqual((o.reply or {}).get("result"), "CORRECT")
+        self.assertIn("/artifact/", o.downloads[0].url)
+
+    def test_dead_download_link_falls_back_to_op_artifact(self):
+        fake, url = self._fake(seed=21)
+        orig = fake._view
+        fake._view = lambda a: {**orig(a), "download": "/artifact/not-this-one"}
+        o = play(GameMaster(url, fake.token), Archive(self.runs), CID, timed=True, use_retry=None, submit=True)
+        self.assertEqual((o.reply or {}).get("result"), "CORRECT")
+
+    def test_pc_clock_ahead_does_not_abandon_a_live_attempt(self):
+        # Review finding: deadlines judged on the local clock made race retry on a live attempt.
+        fake, url = self._fake(seed=22, timed_by_default=True, time_limit=60)
+        ahead = lambda: datetime.now(timezone.utc) + timedelta(seconds=90)
+        with mock.patch("hunt.model.utcnow", ahead), mock.patch("hunt.gm.utcnow", ahead):
+            code, out = self._cli(fake, url, "race", CID, "--force", "--no-prompt")
+        self.assertEqual(code, 0, out)
+        self.assertIn("ahead of", out)
+        self.assertEqual((len(fake.history), fake.attempt.state), (1, "solved"))
+
+    def test_server_409_keeps_the_live_attempt(self):
+        fake, url = self._fake(seed=23, timed_by_default=True, time_limit=60)
+        gm = GameMaster(url, fake.token)
+        gm.server_now = lambda: datetime.now(timezone.utc) + timedelta(hours=1)  # no usable clock
+        o = play(gm, Archive(self.runs), CID, timed=True, use_retry=None, submit=True)
+        self.assertEqual((o.reply or {}).get("result"), "CORRECT")
+        self.assertEqual(len(fake.history), 1)
+
+    def test_failed_attempt_is_left_for_a_fresh_one(self):
+        fake, url = self._fake(seed=24, time_limit=60)
+        gm = GameMaster(url, fake.token)
+        gm.start(CID, run_for_time=True)
+        gm.submit(CID, {"evidence-note-md5": "0" * 32})  # one wrong answer fails the attempt
+        self.assertEqual(fake.attempt.state, "failed")
+        code, out = self._cli(fake, url, "race", CID, "--force", "--no-prompt")
+        self.assertEqual(code, 0, out)
+        self.assertEqual((len(fake.history), fake.attempt.state), (2, "solved"))
+
+    def test_race_exit_code_reflects_the_verdict(self):
+        fake, url = self._fake(seed=25)
+        fake._submit = lambda answers: (200, {"result": "incorrect"})
+        code, out = self._cli(fake, url, "race", CID, "--force", "--no-prompt")
+        self.assertEqual(code, 4, out)
+        self.assertIn("NOT SOLVED", out)
+
+    def test_race_repeat_runs_fresh_attempts(self):
+        fake, url = self._fake(seed=26)
+        code, out = self._cli(fake, url, "race", CID, "--force", "--no-prompt", "--repeat", "3", "--gap", "0")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.count("CORRECT  on-clock"), 3)
+        self.assertEqual([a.state for a in fake.history], ["solved"] * 3)
+        self.assertTrue(all(a.timed for a in fake.history))
+
+    def test_race_repeat_stops_at_the_first_bad_result_and_keeps_a_reserve(self):
+        fake, url = self._fake(seed=27)
+        orig, calls = fake._submit, []
+
+        def flaky(answers):
+            calls.append(1)
+            return orig(answers) if len(calls) < 2 else (200, {"result": "incorrect"})
+        fake._submit = flaky
+        code, out = self._cli(fake, url, "race", CID, "--force", "--no-prompt", "--repeat", "5", "--gap", "0")
+        self.assertEqual(code, 4, out)
+        self.assertEqual(len(fake.history), 2)
+        fake2, url2 = self._fake(seed=28)
+        fake2.ranked_left = 10
+        code, out = self._cli(fake2, url2, "race", CID, "--force", "--no-prompt", "--repeat", "5", "--gap", "0",
+                              "--keep", "8")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(fake2.history), 2)
+        self.assertIn("keeping 8 in reserve", out)
+
+    def test_ping_reports_round_trip_and_server_time(self):
+        fake, url = self._fake(seed=16)
+        code, out = self._cli(fake, url, "ping", "--count", "3")
+        self.assertEqual(code, 0, out)
+        self.assertIn("network round trip", out)
+        self.assertIn("warm connection", out)
+
+    def test_race_on_timed_by_default_route(self):
+        fake, url = self._fake(seed=14, timed_by_default=True)
+        code, out = self._cli(fake, url, "race", CID, "--force", "--no-prompt")
+        self.assertEqual(code, 0, out)
+        self.assertEqual((fake.attempt.timed, fake.attempt.state), (True, "solved"))
+
     def test_replay_catches_a_regression(self):
         fake, url = self._fake(seed=4)
         play(GameMaster(url, fake.token), Archive(self.runs), CID, timed=False, use_retry=False, submit=True)
@@ -611,3 +773,35 @@ class SecondReview(unittest.TestCase):
         from hunt.gate import normalize
         q = Attempt.from_response(CID, {"questions": [dict(LIVE_QS[0], normalization="ignore_surrounding_whitespace")]}).questions[0]
         self.assertNotEqual(normalize(q, "Evidence-Note.TXT"), normalize(q, "evidence-note.txt"))
+
+
+class LiveTimeTrialShape(unittest.TestCase):
+    """Question set seen live on metadata-forensics-day-01-hash-to-ride/time_trial (2026-10-13);
+    the artifact bytes here are stand-ins with the same names."""
+
+    def test_time_trial_questions(self):
+        z = "metadata-day-01-evidence.zip"
+        hexq = lambda qid, algo, n, member: {
+            "id": qid, "question": f"Inspect `{member}`. What is its {algo} digest?", "artifact": f"{z} -> {member}",
+            "answer_format": {"kind": "pattern", "syntax": f"exact {n}-character hexadecimal {algo} digest; letter case is ignored"},
+            "normalization": "case_insensitive"}
+        qs = [{"id": "roster-filename", "question": "What is the exact filename of the roster?", "artifact": z,
+               "answer_format": {"kind": "exact_text", "syntax": "exact base filename including its extension, with no "
+                                                                 "directory path, quotes, or explanatory text"},
+               "normalization": "trim"},
+              {"id": "evidence-note-copy-size-bytes",
+               "question": "Inspect `evidence-note-copy.txt`. What is its exact size in bytes?",
+               "artifact": f"{z} -> evidence-note-copy.txt",
+               "answer_format": {"kind": "integer", "syntax": "base-10 integer with no units, separators, or explanatory text"},
+               "normalization": "trim"},
+              hexq("roster-md5", "MD5", 32, "roster.csv"),
+              hexq("evidence-note-sha1", "SHA-1", 40, "evidence-note.txt"),
+              hexq("roster-sha256", "SHA-256", 64, "roster.csv")]
+        files = [("evidence-note.txt", b"note\n"), ("evidence-note-copy.txt", b"note copy\n"),
+                 ("roster.csv", b"name,role\nana,analyst\n")]
+        _, dec = _decide(qs, files, name=z)
+        self.assertEqual(dec.held, {})
+        self.assertEqual(dec.submit["roster-filename"], "roster.csv")
+        self.assertEqual(dec.submit["evidence-note-copy-size-bytes"], "10")
+        self.assertEqual(dec.submit["roster-md5"], hashlib.md5(files[2][1]).hexdigest())
+        self.assertEqual(dec.submit["evidence-note-sha1"], hashlib.sha1(files[0][1]).hexdigest())

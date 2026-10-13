@@ -26,6 +26,10 @@ def load_token() -> str | None:
             raw = Path(path).expanduser().read_bytes()
             # PowerShell 5.1 writes UTF-16 (or UTF-8 with BOM) by default.
             tok = raw.decode("utf-16") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else raw.decode("utf-8-sig")
+    return clean_token(tok)
+
+
+def clean_token(tok: str | None) -> str | None:
     if not tok:
         return None
     tok = tok.strip().lstrip("\ufeff").strip()
@@ -35,7 +39,7 @@ def load_token() -> str | None:
         # Never echo the value: error output gets pasted into chats.
         raise ConfigError("the Game Master token contains spaces, control or non-ASCII characters; "
                           "copy it again (value not shown)")
-    return tok
+    return tok or None
 
 
 def base_url(token: str | None) -> str:

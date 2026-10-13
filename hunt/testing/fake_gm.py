@@ -16,6 +16,7 @@ import json
 import random
 import secrets
 import threading
+import time
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -121,9 +122,16 @@ class _Attempt:
 
 class FakeGM:
     def __init__(self, token: str = "rehearsal-token", mode: str = "trio", seed: int = 1,
-                 opaque_ids: bool = False, timed_by_default: bool = False, time_limit: float = 30.0):
+                 opaque_ids: bool = False, timed_by_default: bool = False, time_limit: float = 30.0,
+                 prepare_delay: float = 0.0, proxy_prefix: str = "", root_links: bool = False):
         self.token, self.mode, self.opaque = token, mode, opaque_ids
+        # proxy_prefix: serve the API only under a path, like the Homebase proxy
+        # (http://10.0.0.219/huntress-ctf-proxy). root_links: hand out download
+        # links like '/artifact/<id>', which only work on the direct host.
+        self.proxy_prefix, self.root_links = proxy_prefix.rstrip("/"), root_links
+        self.ranked_left = 32  # like ranked_attempts_remaining in live replies
         self.timed_by_default, self.time_limit = timed_by_default, time_limit
+        self.prepare_delay = prepare_delay  # the real server can take a while to prepare a variant
         self.rng = random.Random(seed)
         self.attempt: _Attempt | None = None
         self.history: list[_Attempt] = []
@@ -132,9 +140,13 @@ class FakeGM:
 
     # ---- game logic ---------------------------------------------------------
     def _new(self, timed: bool) -> _Attempt:
+        if self.prepare_delay:
+            time.sleep(self.prepare_delay)
         v = make_variant(self.rng, self.mode)
         ids = {q["id"]: (secrets.token_hex(6) if self.opaque else q["id"]) for q in v.questions}
         deadline = datetime.now(timezone.utc) + timedelta(seconds=self.time_limit) if timed else None
+        if timed:
+            self.ranked_left -= 1
         self.attempt = _Attempt(secrets.token_hex(8), v, timed, deadline, ids)
         self.history.append(self.attempt)
         return self.attempt
@@ -143,12 +155,15 @@ class FakeGM:
         if a.state == "solved":
             return {"result": "CORRECT", "solved_by": {"name": "rehearsal"}, "questions": a.variant.questions}
         d = {"challenge": CID, "attempt_id": a.id, "questions": a.variant.questions,
-             "answer_ids": list(a.answer_ids.values()), "download": f"?op=artifact&challenge={CID}",
+             "answer_ids": list(a.answer_ids.values()),
+             "download": f"/artifact/{a.id}" if self.root_links else f"?op=artifact&challenge={CID}",
              "artifact_sha256": hashlib.sha256(a.variant.zip_bytes).hexdigest(),
-             "unique_attempts_remaining": 5}
+             "unique_attempts_remaining": 5, "ranked_attempts_remaining": self.ranked_left}
         if a.deadline:
             d["deadline"] = a.deadline.isoformat().replace("+00:00", "Z")
             d["hall_of_fame_eligible"] = True
+        if a.state in ("failed", "expired"):
+            d["result"] = a.state
         return d
 
     def _expired(self, a: _Attempt) -> bool:
@@ -241,22 +256,35 @@ class FakeGM:
             def do_HEAD(self):
                 self._send(200, b"", "text/plain")
 
+            def _routed(self) -> bool:
+                path = urlsplit(self.path).path.rstrip("/")
+                if path != gm.proxy_prefix and not (path.startswith("/artifact/") and not gm.proxy_prefix):
+                    self._send(404, b'{"error":"not found"}', "application/json")
+                    return False
+                return True
+
+            def _artifact(self, attempt_id: str | None = None):
+                with gm.lock:
+                    a = gm.attempt
+                if a is None or (attempt_id and attempt_id != a.id):
+                    return self._send(404 if attempt_id else 409, b'{"error":"no such attempt"}', "application/json")
+                return self._send(200, a.variant.zip_bytes, "application/zip",
+                                  {"Content-Disposition": f'attachment; filename="{ZIP_NAME}"'})
+
             def do_GET(self):
-                if not self._auth():
+                if not self._auth() or not self._routed():
                     return
+                path = urlsplit(self.path).path
+                if path.startswith("/artifact/"):
+                    return self._artifact(path.rsplit("/", 1)[-1])
                 q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
                 if q.get("op") == "artifact":
-                    with gm.lock:
-                        a = gm.attempt
-                    if a is None:
-                        return self._send(409, b'{"error":"no attempt"}', "application/json")
-                    return self._send(200, a.variant.zip_bytes, "application/zip",
-                                      {"Content-Disposition": f'attachment; filename="{ZIP_NAME}"'})
+                    return self._artifact()
                 code, data = gm.handle("GET", q, {})
                 self._send(code, json.dumps(data).encode(), "application/json")
 
             def do_POST(self):
-                if not self._auth():
+                if not self._auth() or not self._routed():
                     return
                 n = int(self.headers.get("Content-Length") or 0)
                 try:
@@ -275,7 +303,7 @@ class FakeGM:
 
         self.server = Server(("127.0.0.1", 0), H)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
-        return f"http://127.0.0.1:{self.server.server_address[1]}/"
+        return f"http://127.0.0.1:{self.server.server_address[1]}" + (self.proxy_prefix or "/")
 
     def stop(self) -> None:
         if self.server:
