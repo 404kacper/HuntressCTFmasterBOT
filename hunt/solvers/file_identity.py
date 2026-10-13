@@ -89,12 +89,10 @@ def subject(q: Question, ctx: Context) -> tuple[Member | None, float, str]:
             return m, 0.99, f"question names {q.artifact!r}"
         return None, 0.0, f"question names {q.artifact!r} but no single such file is in the artifact"
 
-    top = arts.top(chain[0] if chain else None)
+    # The container the question is about: the download itself, or a member
+    # inside it that the question names (Mastery ships a zip of zips).
+    top = arts.resolve(chain) if chain else arts.top(None)
     if top is None:
-        if len(chain) == 1:  # maybe the question names an inner file directly
-            m = arts.resolve(chain)
-            if m is not None:
-                return m, 0.95, f"question names {chain[0]!r}"
         return None, 0.0, "cannot tell which downloaded artifact the question is about"
     kids = arts.children(top)
     if not kids:
@@ -106,8 +104,8 @@ def subject(q: Question, ctx: Context) -> tuple[Member | None, float, str]:
     ordinal = _ORDINAL_RX.search(text)
     named, stem = _named_by_siblings(q, top, ctx)
     pick, pconf, pwhy = _by_ordinal(q, kids, text)
-    # Siblings only vouch for a file when their ids share a stem with this one
-    # ('evidence-note-size' -> 'evidence-note-filename'); 'q1'/'q2' prove nothing.
+    # Siblings only vouch for a file when their ids describe the same subject
+    # ('set2.evidence-note-size-bytes' -> 'set2.evidence-note-filename'); 'q1'/'q2' prove nothing.
     sibling = named[0] if len(named) == 1 and stem > 0 else None
 
     mentioned = [k for k in kids if "." in k.basename and _mentions(text, k.basename)]
@@ -132,10 +130,10 @@ def subject(q: Question, ctx: Context) -> tuple[Member | None, float, str]:
         if pick is not None:
             return m, 0.6, f"sibling questions name {m.name} but {pwhy}"
         scores = {id(k): len(set(_words(text)) & set(_words(k.basename))) for k in kids}
-        best = max(scores.values())
-        if scores[id(m)] >= 1 and scores[id(m)] == best and sum(v == best for v in scores.values()) == 1:
+        best, mine = max(scores.values()), scores.get(id(m), 0)
+        if mine >= 1 and mine == best and sum(v == best for v in scores.values()) == 1:
             return m, 0.95, f"the file the sibling questions name ({m.name}); wording fits it best"
-        if scores[id(m)] < best:
+        if mine < best:
             return m, 0.6, f"sibling questions name {m.name} but the wording fits another file better"
         return m, 0.85, f"the file the sibling questions name ({m.name}); wording does not confirm it"
     if len(kids) == 1 and not ordinal:
@@ -161,19 +159,42 @@ def _stem_len(a: str, b: str) -> int:
     return cut + 1
 
 
+_ATTR_SUFFIX = re.compile(r"[-_.](?:file-?name|name|size(?:[-_]bytes)?|bytes|length|md5|sha-?1|sha-?224|sha-?256|"
+                          r"sha-?384|sha-?512|sha3[-_]?\d+|crc-?32|blake2[bs]|digest|hash|type|path|mtime|extension)$",
+                          re.I)
+
+
+def _subject_key(qid: str) -> str:
+    """'set2.evidence-note-size-bytes' -> 'set2.evidence-note': the id minus the
+    attribute it asks for, i.e. which file the question is about."""
+    key = qid
+    while (m := _ATTR_SUFFIX.search(key)) and m.start() > 0:
+        key = key[:m.start()]
+    return key
+
+
 def _named_by_siblings(q: Question, top: Member, ctx: Context) -> tuple[list[Member], int]:
+    """Files inside `top` that other questions name by artifact path, and how
+    strongly they vouch: 2 = same subject key, 1 = shared id stem, 0 = unrelated."""
+    key = _subject_key(q.id)
+    same_key: dict[int, Member] = {}
     by_stem: dict[int, dict[int, Member]] = {}
     for other in ctx.attempt.questions:
         oc = other.artifact_chain
-        if other is q or len(oc) < 2 or ctx.artifacts.top(oc[0]) is not top:
+        if other is q or len(oc) < 2:
             continue
         m = ctx.artifacts.resolve(oc)
-        if m is not None:
-            by_stem.setdefault(_stem_len(q.id, other.id), {})[id(m)] = m
+        if m is None or m.chain[:-1] != top.chain:
+            continue
+        if key != q.id and _subject_key(other.id) == key:
+            same_key[id(m)] = m
+        by_stem.setdefault(_stem_len(q.id, other.id), {})[id(m)] = m
+    if same_key:
+        return list(same_key.values()), 2
     if not by_stem:
         return [], 0
     best = max(by_stem)
-    return list(by_stem[best].values()), best
+    return list(by_stem[best].values()), 1 if best > 0 else 0
 
 
 def _words(s: str) -> list[str]:
@@ -191,16 +212,18 @@ def _by_ordinal(q: Question, kids: list[Member], text: str) -> tuple[Member | No
     idx = _ORDINALS[m.group(1).lower()]
     phrase = m.group(0).strip()
     keywords = _words(m.group(2))
+    # "the first evidence note": a file literally called evidence-note beats evidence-note-copy.
+    exact = [k for k in kids if keywords and set(_words(k.basename.rsplit(".", 1)[0])) == set(keywords)]
     named = [k for k in kids if keywords and all(w in k.basename.lower() for w in keywords)]
     some = [k for k in kids if any(w in k.basename.lower() for w in keywords)]
-    for cands, base, tier in ((named, 0.85, "all"), (some, 0.7, "some"), (kids, 0.5, "none")):
+    for cands, base, tier in ((exact, 0.85, "exact"), (named, 0.85, "all"), (some, 0.7, "some"), (kids, 0.5, "none")):
         if not cands:
             continue
         ordered = sorted(cands, key=lambda k: k.order)
         if not -len(ordered) <= idx < len(ordered):
             continue
         pick = ordered[idx]
-        if len(ordered) == 1 and tier == "all" and idx in (0, -1):
+        if len(ordered) == 1 and tier in ("exact", "all") and idx in (0, -1):
             conf = 0.9  # exactly one file fits the description
         else:  # "first" is ambiguous if name order disagrees with archive order
             conf = base if sorted(cands, key=lambda k: k.name)[idx] is pick else base - 0.15

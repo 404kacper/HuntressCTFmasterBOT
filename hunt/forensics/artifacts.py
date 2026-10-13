@@ -264,6 +264,13 @@ class ArtifactSet:
         cur = self.top(chain[0])
         if cur is None:
             return None
+        if len(self.tops) == 1 and _base_key(cur.name) != _base_key(chain[0]):
+            # The download's own name differs from the label. If the label names
+            # something inside it (Mastery: one zip holding evidence-01.zip and
+            # evidence-02.zip), that inner member is what the question means.
+            inner = self._walk(cur, chain)
+            if inner is not None:
+                return inner
         hit = self._walk(cur, chain[1:])
         if hit is None and len(self.tops) == 1:
             # The question may name the inner file without naming the container.
@@ -289,6 +296,10 @@ def _match(members: list[Member], name: str) -> Member | None:
         if hits:
             return hits[0] if len(hits) == 1 else None
     return None
+
+
+def _base_key(name: str) -> str:
+    return posixpath.basename(norm_name(name)).casefold()
 
 
 def _is_tar(data: bytes) -> bool:

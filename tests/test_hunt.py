@@ -805,3 +805,63 @@ class LiveTimeTrialShape(unittest.TestCase):
         self.assertEqual(dec.submit["evidence-note-copy-size-bytes"], "10")
         self.assertEqual(dec.submit["roster-md5"], hashlib.md5(files[2][1]).hexdigest())
         self.assertEqual(dec.submit["evidence-note-sha1"], hashlib.sha1(files[0][1]).hexdigest())
+
+
+class LiveMasteryShape(unittest.TestCase):
+    """Question set seen live on .../mastery (2026-10-13): one download holding two evidence
+    zips; questions name the inner zips. File bytes here are stand-ins with the same names."""
+
+    @staticmethod
+    def _q(qid, text, artifact, kind, syntax, norm):
+        return {"id": qid, "question": text, "artifact": artifact,
+                "answer_format": {"kind": kind, "syntax": syntax}, "normalization": norm}
+
+    def _questions(self):
+        z1, z2 = "metadata-day-01-evidence-01.zip", "metadata-day-01-evidence-02.zip"
+        name = ("exact_text", "exact base filename including its extension, with no directory path, quotes, or explanatory text", "trim")
+        size = ("integer", "base-10 integer with no units, separators, or explanatory text", "trim")
+        md5 = ("pattern", "exact 32-character hexadecimal MD5 digest; letter case is ignored", "case_insensitive")
+        sha1 = ("pattern", "exact 40-character hexadecimal SHA-1 digest; letter case is ignored", "case_insensitive")
+        sha256 = ("pattern", "exact 64-character hexadecimal SHA-256 value; use no prefix, spaces, or explanatory text", "case_insensitive")
+        q = self._q
+        return [
+            q("set1.evidence-note-copy-filename", "What is the exact filename of the renamed evidence-note copy?", z1, *name),
+            q("set1.evidence-note-copy-size-bytes", "Inspect `evidence-note-copy.txt`. What is its exact size in bytes?", f"{z1} -> evidence-note-copy.txt", *size),
+            q("set1.roster-md5", "Inspect `roster.csv`. What is its MD5 digest?", f"{z1} -> roster.csv", *md5),
+            q("set1.evidence-note-sha1", "Inspect `evidence-note.txt`. What is its SHA-1 digest?", f"{z1} -> evidence-note.txt", *sha1),
+            q("set1.roster-sha256", "Inspect `roster.csv`. What is its SHA-256 digest?", f"{z1} -> roster.csv", *sha256),
+            q("set2.evidence-note-filename", "What is the exact filename of the first evidence note?", z2, *name),
+            q("set2.evidence-note-size-bytes", "Inspect `evidence-note.txt`. What is its exact size in bytes?", f"{z2} -> evidence-note.txt", *size),
+            q("set2.evidence-note-copy-md5", "Inspect `evidence-note-copy.txt`. What is its MD5 digest?", f"{z2} -> evidence-note-copy.txt", *md5),
+            q("set2.evidence-note-sha1", "Inspect `evidence-note.txt`. What is its SHA-1 digest?", f"{z2} -> evidence-note.txt", *sha1),
+            q("set2.roster-sha256", "Inspect `roster.csv`. What is its SHA-256 digest?", f"{z2} -> roster.csv", *sha256),
+        ]
+
+    def test_mastery_zip_of_zips(self):
+        n1, n2 = b"note one\n" * 20, b"note two!\n" * 24
+        r1, r2 = b"name,role\na,b\n", b"name,role\nc,d\ne,f\n"
+        inner1 = _zip([("evidence-note.txt", n1), ("evidence-note-copy.txt", n1 + b"x"), ("roster.csv", r1)])
+        inner2 = _zip([("evidence-note-copy.txt", n2 + b"y"), ("evidence-note.txt", n2), ("roster.csv", r2)])  # copy first
+        outer = _zip([("metadata-day-01-evidence-01.zip", inner1), ("metadata-day-01-evidence-02.zip", inner2)])
+        sol, dec = _decide(self._questions(), outer, name="metadata-forensics-day-01-hash-to-ride-mastery.zip")
+        self.assertEqual(sol.notes, [])  # no handler crashed (live run hit a KeyError here)
+        self.assertEqual(dec.held, {})
+        want = {
+            "set1.evidence-note-copy-filename": "evidence-note-copy.txt",
+            "set1.evidence-note-copy-size-bytes": str(len(n1) + 1),
+            "set1.roster-md5": hashlib.md5(r1).hexdigest(),
+            "set1.evidence-note-sha1": hashlib.sha1(n1).hexdigest(),
+            "set1.roster-sha256": hashlib.sha256(r1).hexdigest(),
+            "set2.evidence-note-filename": "evidence-note.txt",
+            "set2.evidence-note-size-bytes": str(len(n2)),
+            "set2.evidence-note-copy-md5": hashlib.md5(n2 + b"y").hexdigest(),
+            "set2.evidence-note-sha1": hashlib.sha1(n2).hexdigest(),
+            "set2.roster-sha256": hashlib.sha256(r2).hexdigest(),
+        }
+        self.assertEqual(dec.submit, want)
+
+    def test_download_without_a_name(self):
+        inner = _zip([("evidence-note.txt", b"n"), ("evidence-note-copy.txt", b"c"), ("roster.csv", b"r")])
+        outer = _zip([("metadata-day-01-evidence-01.zip", inner), ("metadata-day-01-evidence-02.zip", inner)])
+        _, dec = _decide(self._questions(), outer, name="")
+        self.assertEqual(dec.held, {})
