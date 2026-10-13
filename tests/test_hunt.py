@@ -641,6 +641,27 @@ class AgainstFakeGameMaster(unittest.TestCase):
         self.assertIn("sent 5 answer(s)", out)
         self.assertIn("hall_of_fame_eligible", out)
 
+    def test_two_downloads_behind_the_proxy_are_never_duplicates(self):
+        # Live: a timed Mastery variant had two download links; behind the proxy both became
+        # op=artifact and the same file was fetched twice.
+        fake, url = self._fake(seed=36, root_links=True, proxy_prefix="/huntress-ctf-proxy", two_deliveries=True)
+        gm = GameMaster(url, fake.token)
+        a = Attempt.from_response(CID, gm.start(CID))
+        self.assertEqual(len(a.downloads), 2)
+        with self.assertRaises(GMError) as cm:
+            gm.artifacts(CID, a.downloads)
+        self.assertIn("not reachable through", str(cm.exception))
+        fake.proxy_passthrough = True
+        got = gm.artifacts(CID, a.downloads)
+        self.assertEqual(len({hashlib.sha256(g.data).hexdigest() for g in got}), 2)
+
+    def test_two_downloads_on_the_direct_host(self):
+        fake, url = self._fake(seed=37, root_links=True, two_deliveries=True)
+        gm = GameMaster(url, fake.token)
+        a = Attempt.from_response(CID, gm.start(CID))
+        got = gm.artifacts(CID, a.downloads)
+        self.assertEqual(len({hashlib.sha256(g.data).hexdigest() for g in got}), 2)
+
     def test_ping_reports_round_trip_and_server_time(self):
         fake, url = self._fake(seed=16)
         code, out = self._cli(fake, url, "ping", "--count", "3")

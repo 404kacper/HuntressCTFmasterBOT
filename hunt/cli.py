@@ -10,6 +10,7 @@
   hunt race CID                      timed Hall-of-Fame run (start, or retry if already finished)
   hunt offline CID                   re-solve the latest archived attempt, no network
   hunt replay [CID]                  regression: re-solve every archived CORRECT attempt
+  hunt inspect CID                   what the Game Master sent for archived attempts (no network)
   hunt rehearse                      full race against a local fake Game Master
 """
 from __future__ import annotations
@@ -140,8 +141,51 @@ def cmd_openapi(args) -> int:
     spec = _gm(args).openapi()
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(spec, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"saved {out}")
+    text = json.dumps(spec, indent=2, ensure_ascii=False)
+    out.write_text(text, encoding="utf-8")
+    print(f"saved {out} ({len(text)} characters)")
+    if args.grep:
+        lines = text.splitlines()
+        hits = [i for i, line in enumerate(lines) if any(w.lower() in line.lower() for w in args.grep)]
+        shown: set[int] = set()
+        for i in hits:
+            for j in range(max(0, i - args.context), min(len(lines), i + args.context + 1)):
+                if j not in shown:
+                    if shown and j - 1 not in shown:
+                        print("  ...")
+                    print(f"{j + 1:6}: {lines[j]}")
+                    shown.add(j)
+        print(f"({len(hits)} matching line(s) for {', '.join(args.grep)})")
+    return 0
+
+
+def cmd_inspect(args) -> int:
+    """Show what the Game Master actually sent for each archived attempt of a
+    challenge: download fields, question artifact labels, and what was fetched.
+    Read-only: no network."""
+    runs = Archive(args.runs).runs(args.challenge)
+    if not runs:
+        print("nothing archived for that challenge")
+        return 1
+    skip = {"guidance", "questions", "prompt", "name"}
+    for run in runs[-args.last:]:
+        data = run.read_json("start.json") or {}
+        print(f"=== {run.path.name}")
+        for k, v in data.items():
+            if k not in skip:
+                print(f"  {k}: {json.dumps(v, ensure_ascii=False)[:400]}")
+        for q in data.get("questions") or []:
+            if isinstance(q, dict):
+                extra = {k: v for k, v in q.items() if k not in ("id", "question", "artifact", "answer_format",
+                                                                   "normalization")}
+                print(f"  Q {q.get('id')} | artifact={q.get('artifact')!r} | {q.get('question')}"
+                      + (f" | {json.dumps(extra, ensure_ascii=False)}" if extra else ""))
+        for m in run.read_json("artifacts.json") or []:
+            print(f"  fetched: name={m.get('name')!r} size={m.get('size')} sha256={str(m.get('sha256'))[:16]}... "
+                  f"url={m.get('url')}")
+        sub = run.read_json("submit.json")
+        if sub:
+            print(f"  submit reply: result={(sub.get('reply') or {}).get('result')!r}")
     return 0
 
 
@@ -501,7 +545,14 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("openapi")
     p.add_argument("--out", default="docs/openapi.json")
+    p.add_argument("--grep", nargs="*", default=[], help="print lines mentioning these words (with context)")
+    p.add_argument("--context", type=int, default=6)
     p.set_defaults(fn=cmd_openapi)
+
+    p = sub.add_parser("inspect", help="show what the Game Master sent for archived attempts (no network)")
+    p.add_argument("challenge")
+    p.add_argument("--last", type=int, default=3, help="how many of the latest runs to show (default 3)")
+    p.set_defaults(fn=cmd_inspect)
 
     p = sub.add_parser("status")
     p.add_argument("challenge")

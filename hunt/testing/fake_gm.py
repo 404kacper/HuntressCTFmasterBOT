@@ -125,7 +125,7 @@ class FakeGM:
     def __init__(self, token: str = "rehearsal-token", mode: str = "trio", seed: int = 1,
                  opaque_ids: bool = False, timed_by_default: bool = False, time_limit: float = 30.0,
                  prepare_delay: float = 0.0, proxy_prefix: str = "", root_links: bool = False,
-                 pending_for: float = 0.0):
+                 pending_for: float = 0.0, two_deliveries: bool = False, proxy_passthrough: bool = False):
         self.token, self.mode, self.opaque = token, mode, opaque_ids
         # proxy_prefix: serve the API only under a path, like the Homebase proxy
         # (http://10.0.0.219/huntress-ctf-proxy). root_links: hand out download
@@ -135,6 +135,10 @@ class FakeGM:
         # Seconds after a solve during which retry hands back the solved attempt
         # ("if scoring is still pending, that attempt stays in place until confirmation").
         self.pending_for = pending_for
+        # Like the live timed Mastery variant: two separate downloads (root-relative links)
+        # instead of one zip of zips; op=artifact can only return the first.
+        self.two_deliveries = two_deliveries
+        self.proxy_passthrough = proxy_passthrough  # serve '<prefix>/artifact/...' links through the proxy
         self.timed_by_default, self.time_limit = timed_by_default, time_limit
         self.prepare_delay = prepare_delay  # the real server can take a while to prepare a variant
         self.rng = random.Random(seed)
@@ -170,6 +174,9 @@ class FakeGM:
             d["hall_of_fame_eligible"] = True
         if a.state in ("failed", "expired"):
             d["result"] = a.state
+        if self.two_deliveries:
+            d.pop("download", None)
+            d["downloads"] = [f"/artifact/{a.id}/1", f"/artifact/{a.id}/2"]
         return d
 
     def _expired(self, a: _Attempt) -> bool:
@@ -268,25 +275,31 @@ class FakeGM:
 
             def _routed(self) -> bool:
                 path = urlsplit(self.path).path.rstrip("/")
+                if gm.proxy_prefix and gm.proxy_passthrough and path.startswith(gm.proxy_prefix + "/artifact/"):
+                    return True
                 if path != gm.proxy_prefix and not (path.startswith("/artifact/") and not gm.proxy_prefix):
                     self._send(404, b'{"error":"not found"}', "application/json")
                     return False
                 return True
 
-            def _artifact(self, attempt_id: str | None = None):
+            def _artifact(self, attempt_id: str | None = None, delivery: str = "1"):
                 with gm.lock:
                     a = gm.attempt
                 if a is None or (attempt_id and attempt_id != a.id):
                     return self._send(404 if attempt_id else 409, b'{"error":"no such attempt"}', "application/json")
-                return self._send(200, a.variant.zip_bytes, "application/zip",
+                data = a.variant.zip_bytes if delivery == "1" else a.variant.zip_bytes + b"delivery-" + delivery.encode()
+                return self._send(200, data, "application/zip",
                                   {"Content-Disposition": f'attachment; filename="{ZIP_NAME}"'})
 
             def do_GET(self):
                 if not self._auth() or not self._routed():
                     return
                 path = urlsplit(self.path).path
+                if gm.proxy_prefix and path.startswith(gm.proxy_prefix + "/"):
+                    path = path[len(gm.proxy_prefix):]
                 if path.startswith("/artifact/"):
-                    return self._artifact(path.rsplit("/", 1)[-1])
+                    parts = path.split("/")  # ['', 'artifact', id] or ['', 'artifact', id, n]
+                    return self._artifact(parts[2], parts[3] if len(parts) > 3 else "1")
                 q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
                 if q.get("op") == "artifact":
                     return self._artifact()

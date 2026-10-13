@@ -6,6 +6,7 @@ nothing here knows about any particular challenge.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 import sys
 import time
@@ -220,8 +221,28 @@ class GameMaster:
     def artifacts(self, challenge: str, downloads: list[str]) -> list[Download]:
         if len(downloads) <= 1:
             return [self.artifact(challenge, downloads[0] if downloads else None)]
+        if sum(self.download_url(d) is None for d in downloads) > 1:
+            # Behind a path-prefixed proxy every root-relative link would collapse onto the
+            # same op=artifact fetch (one file, several times). Try each link under the
+            # proxy prefix instead; never hand back duplicates.
+            with ThreadPoolExecutor(max_workers=min(8, len(downloads))) as pool:
+                got = list(pool.map(lambda d: self._passthrough(challenge, d), downloads))
+            if len({hashlib.sha256(g.data).digest() for g in got}) < len(got):
+                raise GMError(f"{len(downloads)} download links, but the proxy returned identical files for "
+                              "them; cannot fetch them separately from here")
+            return got
         with ThreadPoolExecutor(max_workers=min(8, len(downloads))) as pool:
             return list(pool.map(lambda d: self.artifact(challenge, d), downloads))
+
+    def _passthrough(self, challenge: str, download: str) -> Download:
+        t = time.perf_counter()
+        link = download if download.startswith("/") else "/" + download
+        r = self._fetch(challenge, self.base.rstrip("/") + link)
+        if r.status_code >= 400:
+            raise GMError(f"{download!r} is not reachable through {self.base} (HTTP {r.status_code}) and "
+                          "op=artifact can only return one file; see `hunt openapi --grep artifact download`",
+                          r.status_code)
+        return Download(r.content, r.url, _filename(r), time.perf_counter() - t, len(r.history))
 
 
 def _filename(r: requests.Response) -> str | None:
