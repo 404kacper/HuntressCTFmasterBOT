@@ -26,7 +26,7 @@ cd HuntressCTFmasterBOT
 git checkout claude/huntress-ctf-solver-8n8edz
 py -m pip install requests
 
-# every time: find the challenge id (the bot asks for your token, typing is hidden)
+# every time: find the challenge id
 py -m hunt list --day 1
 
 # practise with no clock (nothing is sent), then for real (still no clock)
@@ -42,19 +42,13 @@ for a fresh untimed copy, then `py -m hunt solve <challenge-id> --submit`. If `l
 says **START IS TIMED**, there is no untimed copy: go straight to
 `py -m hunt race <challenge-id> --force`.
 
-## Setup details
+## Token
 
-The bot asks for the token when it isn't set. To avoid typing it every time
-in one PowerShell window:
-
-```powershell
-$s = Read-Host -AsSecureString "Game Master token"
-$env:HUNTRESS_GM_TOKEN = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($s))
-```
-
-Or put the token in a file outside the repo and set `$env:HUNTRESS_GM_TOKEN_FILE`
-to its path. `HUNTRESS_GM_URL` (or `GM`, which your old script used) overrides the
-endpoint. With no token, the bot uses the Homebase proxy URL.
+The bot reads `HUNTRESS_GM_TOKEN` (and `GM` or `HUNTRESS_GM_URL` for the endpoint, as
+`solution.py` did). If you set them with `setx`, there is nothing else to do: just
+open a new terminal afterwards, because `setx` does not change the window it runs in.
+Only if the variable is missing does the bot ask for the token, with hidden typing.
+`HUNTRESS_GM_TOKEN_FILE` (a path to a file holding the token) also works.
 
 ## The loop for a new challenge
 
