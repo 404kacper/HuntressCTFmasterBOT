@@ -72,6 +72,7 @@ class Attempt:
     warnings: list[str] = field(default_factory=list)
     answer_id_dict: dict[str, str] | None = None  # when the reply gives answer_ids as a mapping
     answer_ids_malformed: bool = False  # entries that are not plain ids (objects, lists, ...)
+    download_sha256: list[str | None] = field(default_factory=list)  # per download, when the reply says
 
     @classmethod
     def from_response(cls, challenge: str, data: dict) -> "Attempt":
@@ -85,7 +86,8 @@ class Attempt:
             raw=data,
             questions=questions,
             answer_ids=answer_ids,
-            downloads=_collect_downloads(data),
+            downloads=[u for u, _ in _download_entries(data)],
+            download_sha256=[h for _, h in _download_entries(data)],
             deadline=_parse_time(data.get("deadline")),
             attempt_id=_first(data, ("attempt_id", "attempt")),
             expected_sha256=set(_sha256_values(data)),
@@ -182,24 +184,33 @@ def _answer_ids(data: dict) -> list:
     return out
 
 
-def _collect_downloads(data: dict) -> list[str]:
-    found: list[str] = []
+def _download_entries(data: dict) -> list[tuple[str, str | None]]:
+    """(link, expected sha256 or None) for every download, in reply order."""
+    found: list[tuple[str, str | None]] = []
 
-    def take(v):
+    def take(v, sha=None):
         if isinstance(v, str) and v:
-            found.append(v)
+            found.append((v, sha.lower() if isinstance(sha, str) and _HEX64.match(sha) else None))
         elif isinstance(v, dict):
-            take(v.get("url") or v.get("download") or v.get("href"))
+            take(v.get("url") or v.get("download") or v.get("href"), v.get("sha256") or v.get("artifact_sha256"))
         elif isinstance(v, list):
             for x in v:
                 take(x)
 
-    for key in ("download", "downloads", "artifacts"):
+    take(data.get("download"), data.get("sha256") or data.get("artifact_sha256"))
+    for key in ("downloads", "artifacts", "deliveries"):
         take(data.get(key))
     for task in data.get("tasks") or []:
         if isinstance(task, dict):
-            take(task.get("download"))
-    return list(dict.fromkeys(found))
+            take(task.get("download"), task.get("sha256"))
+    seen: dict[str, str | None] = {}
+    for url, sha in found:
+        seen[url] = seen.get(url) or sha
+    return list(seen.items())
+
+
+def _collect_downloads(data: dict) -> list[str]:
+    return [u for u, _ in _download_entries(data)]
 
 
 def _sha256_values(obj, depth: int = 0):

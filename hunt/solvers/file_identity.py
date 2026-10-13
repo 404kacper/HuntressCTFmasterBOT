@@ -79,19 +79,64 @@ _KEEP_EXT = re.compile(r"including (?:its|the) extension|extension included|keep
                        r"with (?:its|the) extension")
 
 
+# ---- which download? (several deliveries) ------------------------------------
+_DELIVERY_PREFIX = re.compile(r"^(?:delivery|download|bundle|package|set)[\s#_-]*(\d+)\s*(?:[:/|]\s*|$)", re.I)
+_DELIVERY_ANY = re.compile(r"\b(?:delivery|download|bundle|package)[\s#_-]*(\d+)\b", re.I)
+
+
+def _delivery_number(q: Question) -> int | None:
+    for key in ("delivery", "delivery_index", "download_index", "set"):
+        v = q.raw.get(key)
+        if isinstance(v, int) and not isinstance(v, bool):
+            return v
+        if isinstance(v, str) and v.strip().isdigit():
+            return int(v)
+    chain = q.artifact_chain
+    if chain and (m := _DELIVERY_PREFIX.match(chain[0])):
+        return int(m.group(1))
+    m = _DELIVERY_ANY.search(q.artifact or "") or _DELIVERY_ANY.search(q.text)
+    return int(m.group(1)) if m else None
+
+
+def delivery_index(q: Question, ctx: Context) -> int | None:
+    """Which download a question is about when several came (reply order,
+    0-based). Numbers in the reply are 1-based unless one of them is 0."""
+    n = len(ctx.artifacts.tops)
+    if n <= 1:
+        return None
+    num = _delivery_number(q)
+    if num is None:
+        return None
+    nums = [x for x in (_delivery_number(o) for o in ctx.attempt.questions) if x is not None]
+    idx = num - (0 if nums and min(nums) == 0 else 1)
+    return idx if 0 <= idx < n else None
+
+
+def located(q: Question, ctx: Context) -> tuple[list[str], int | None]:
+    """The question's artifact path without any 'delivery N' label, plus the delivery index."""
+    chain = q.artifact_chain
+    if chain and (m := _DELIVERY_PREFIX.match(chain[0])):
+        rest = chain[0][m.end():].strip()
+        chain = ([rest] if rest else []) + chain[1:]
+    return chain, delivery_index(q, ctx)
+
+
 # ---- which file? -----------------------------------------------------------
 def subject(q: Question, ctx: Context) -> tuple[Member | None, float, str]:
     arts = ctx.artifacts
-    chain = q.artifact_chain
+    chain, hint = located(q, ctx)
+    if len(arts.tops) > 1 and hint is None and chain and \
+            sum(1 for t in arts.tops if t.basename.casefold() == chain[0].rsplit("/", 1)[-1].casefold()) > 1:
+        return None, 0.0, f"{len(arts.tops)} downloads share the name {chain[0]!r} and nothing says which one is meant"
     if len(chain) >= 2:
-        m = arts.resolve(chain)
+        m = arts.resolve(chain, hint)
         if m is not None:
             return m, 0.99, f"question names {q.artifact!r}"
         return None, 0.0, f"question names {q.artifact!r} but no single such file is in the artifact"
 
     # The container the question is about: the download itself, or a member
     # inside it that the question names (Mastery ships a zip of zips).
-    top = arts.resolve(chain) if chain else arts.top(None)
+    top = arts.resolve(chain, hint) if chain else arts.top(None, hint)
     if top is None:
         return None, 0.0, "cannot tell which downloaded artifact the question is about"
     kids = arts.children(top)
@@ -180,10 +225,10 @@ def _named_by_siblings(q: Question, top: Member, ctx: Context) -> tuple[list[Mem
     same_key: dict[int, Member] = {}
     by_stem: dict[int, dict[int, Member]] = {}
     for other in ctx.attempt.questions:
-        oc = other.artifact_chain
+        oc, ohint = located(other, ctx)
         if other is q or len(oc) < 2:
             continue
-        m = ctx.artifacts.resolve(oc)
+        m = ctx.artifacts.resolve(oc, ohint)
         if m is None or m.chain[:-1] != top.chain:
             continue
         if key != q.id and _subject_key(other.id) == key:

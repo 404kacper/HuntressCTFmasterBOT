@@ -641,26 +641,32 @@ class AgainstFakeGameMaster(unittest.TestCase):
         self.assertIn("sent 5 answer(s)", out)
         self.assertIn("hall_of_fame_eligible", out)
 
-    def test_two_downloads_behind_the_proxy_are_never_duplicates(self):
-        # Live: a timed Mastery variant had two download links; behind the proxy both became
-        # op=artifact and the same file was fetched twice.
+    def test_two_deliveries_behind_the_proxy(self):
+        # Live: a timed Mastery variant had two downloads; behind the proxy both became a bare
+        # op=artifact and the same file was fetched twice. Now each is fetched by 'delivery'.
         fake, url = self._fake(seed=36, root_links=True, proxy_prefix="/huntress-ctf-proxy", two_deliveries=True)
-        gm = GameMaster(url, fake.token)
-        a = Attempt.from_response(CID, gm.start(CID))
-        self.assertEqual(len(a.downloads), 2)
-        with self.assertRaises(GMError) as cm:
-            gm.artifacts(CID, a.downloads)
-        self.assertIn("not reachable through", str(cm.exception))
-        fake.proxy_passthrough = True
-        got = gm.artifacts(CID, a.downloads)
-        self.assertEqual(len({hashlib.sha256(g.data).hexdigest() for g in got}), 2)
+        o = play(GameMaster(url, fake.token), Archive(self.runs), CID, timed=True, use_retry=None, submit=True)
+        self.assertEqual((o.status, (o.reply or {}).get("result")), ("submitted", "CORRECT"), o.message)
+        self.assertEqual(len({hashlib.sha256(d.data).hexdigest() for d in o.downloads}), 2)
+        self.assertTrue(all("delivery=" in d.url for d in o.downloads))
 
-    def test_two_downloads_on_the_direct_host(self):
+    def test_two_deliveries_on_the_direct_host(self):
         fake, url = self._fake(seed=37, root_links=True, two_deliveries=True)
-        gm = GameMaster(url, fake.token)
-        a = Attempt.from_response(CID, gm.start(CID))
-        got = gm.artifacts(CID, a.downloads)
-        self.assertEqual(len({hashlib.sha256(g.data).hexdigest() for g in got}), 2)
+        o = play(GameMaster(url, fake.token), Archive(self.runs), CID, timed=True, use_retry=None, submit=True)
+        self.assertEqual((o.reply or {}).get("result"), "CORRECT", o.message)
+
+    def test_identical_deliveries_are_refused(self):
+        fake, url = self._fake(seed=38, root_links=True, proxy_prefix="/huntress-ctf-proxy", two_deliveries=True)
+        orig = fake._new
+
+        def same_twice(timed):
+            a = orig(timed)
+            a.variant.deliveries = [a.variant.deliveries[0]] * 2
+            return a
+        fake._new = same_twice
+        o = play(GameMaster(url, fake.token), Archive(self.runs), CID, timed=True, use_retry=None, submit=True)
+        self.assertIn(o.status, ("gm-error", "wrong-artifact"))
+        self.assertIsNone(o.sent)
 
     def test_ping_reports_round_trip_and_server_time(self):
         fake, url = self._fake(seed=16)
@@ -949,3 +955,56 @@ class LiveMasteryShape(unittest.TestCase):
         outer = _zip([("metadata-day-01-evidence-01.zip", inner), ("metadata-day-01-evidence-02.zip", inner)])
         _, dec = _decide(self._questions(), outer, name="")
         self.assertEqual(dec.held, {})
+
+
+class DeliveryLabels(unittest.TestCase):
+    """Several downloads with the same name: which one does each question mean?"""
+
+    N1, N2 = b"first delivery note\n", b"second delivery note!!\n"
+
+    def _tops(self):
+        z = "metadata-day-01-evidence.zip"
+        return [(z, _zip([("evidence-note.txt", self.N1)])), (z, _zip([("evidence-note.txt", self.N2)]))]
+
+    def _solve(self, questions):
+        a = Attempt.from_response(CID, {"questions": questions, "answer_ids": [q["id"] for q in questions]})
+        sol = solve(a, ArtifactSet(self._tops()))
+        return decide(a, sol)
+
+    def _q(self, qid, artifact, text="What is its SHA-256 digest?", **extra):
+        return {"id": qid, "question": text, "artifact": artifact, **extra,
+                "answer_format": {"kind": "pattern", "syntax": "exact 64-character hexadecimal SHA-256 value"}}
+
+    def test_styles(self):
+        z = "metadata-day-01-evidence.zip -> evidence-note.txt"
+        want = [hashlib.sha256(self.N1).hexdigest(), hashlib.sha256(self.N2).hexdigest()]
+        styles = {
+            "set field (1-based)": [self._q("a", z, set=1), self._q("b", z, set=2)],
+            "delivery field (0-based)": [self._q("a", z, delivery=0), self._q("b", z, delivery=1)],
+            "label prefix": [self._q("a", "delivery 1: " + z), self._q("b", "delivery 2: " + z)],
+            "label path": [self._q("a", "delivery-1/" + z), self._q("b", "delivery-2/" + z)],
+            "question text": [self._q("a", z, "In delivery 1, what is the SHA-256 digest of the note?"),
+                              self._q("b", z, "In delivery 2, what is the SHA-256 digest of the note?")],
+        }
+        for name, qs in styles.items():
+            dec = self._solve(qs)
+            self.assertEqual(dec.held, {}, name)
+            self.assertEqual([dec.submit["a"], dec.submit["b"]], want, name)
+
+    def test_no_hint_means_hold(self):
+        z = "metadata-day-01-evidence.zip -> evidence-note.txt"
+        dec = self._solve([self._q("a", z), self._q("b", z)])
+        self.assertEqual(dec.submit, {})
+
+    def test_reply_order_is_restored_from_checksums(self):
+        from hunt.runner import _verify_downloads
+        from hunt.gm import Download
+        d1, d2 = (Download(z, "u", "x.zip", 0.0) for _, z in self._tops())
+        a = Attempt.from_response(CID, {"questions": [], "downloads": [
+            {"url": "/a", "sha256": hashlib.sha256(d1.data).hexdigest()},
+            {"url": "/b", "sha256": hashlib.sha256(d2.data).hexdigest()}]})
+        problem, ordered = _verify_downloads(a, [d2, d1])
+        self.assertIsNone(problem)
+        self.assertEqual(ordered, [d1, d2])
+        problem, _ = _verify_downloads(a, [d1, d1])
+        self.assertIn("identical", problem)

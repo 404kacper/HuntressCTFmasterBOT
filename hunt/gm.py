@@ -191,25 +191,27 @@ class GameMaster:
             return None
         return url
 
-    def _fetch(self, challenge: str, url: str | None) -> requests.Response:
+    def _fetch(self, challenge: str, url: str | None, delivery: int | None = None) -> requests.Response:
         t = time.perf_counter()
         try:
             if url is None:
-                return self.s.get(self.base, params={"op": "artifact", "challenge": challenge},
-                                  timeout=self.timeout)
+                params: dict = {"op": "artifact", "challenge": challenge}
+                if delivery is not None:
+                    params["delivery"] = delivery  # documented: picks one of several deliveries (0-based)
+                return self.s.get(self.base, params=params, timeout=self.timeout)
             # Never hand our bearer token to anything but the Game Master itself.
             same = (urlsplit(url).scheme, urlsplit(url).netloc) == (self.scheme, self.host)
             return self.s.get(url, timeout=self.timeout, headers=None if same else {"Authorization": None})
         except requests.RequestException as e:
             raise _transport_error(e, "artifact download", time.perf_counter() - t) from None
 
-    def artifact(self, challenge: str, download: str | None = None) -> Download:
+    def artifact(self, challenge: str, download: str | None = None, delivery: int | None = None) -> Download:
         t = time.perf_counter()
-        url = self.download_url(download)
-        r = self._fetch(challenge, url)
+        url = self.download_url(download) if delivery is None else None
+        r = self._fetch(challenge, url, delivery)
         if r.status_code == 404 and url is not None:
             # The link does not work from where we are; the documented operation is the fallback.
-            r = self._fetch(challenge, None)
+            r = self._fetch(challenge, None, delivery)
         if r.status_code >= 400:
             try:
                 data = r.json()
@@ -222,27 +224,18 @@ class GameMaster:
         if len(downloads) <= 1:
             return [self.artifact(challenge, downloads[0] if downloads else None)]
         if sum(self.download_url(d) is None for d in downloads) > 1:
-            # Behind a path-prefixed proxy every root-relative link would collapse onto the
-            # same op=artifact fetch (one file, several times). Try each link under the
-            # proxy prefix instead; never hand back duplicates.
-            with ThreadPoolExecutor(max_workers=min(8, len(downloads))) as pool:
-                got = list(pool.map(lambda d: self._passthrough(challenge, d), downloads))
-            if len({hashlib.sha256(g.data).digest() for g in got}) < len(got):
-                raise GMError(f"{len(downloads)} download links, but the proxy returned identical files for "
-                              "them; cannot fetch them separately from here")
-            return got
-        with ThreadPoolExecutor(max_workers=min(8, len(downloads))) as pool:
-            return list(pool.map(lambda d: self.artifact(challenge, d), downloads))
-
-    def _passthrough(self, challenge: str, download: str) -> Download:
-        t = time.perf_counter()
-        link = download if download.startswith("/") else "/" + download
-        r = self._fetch(challenge, self.base.rstrip("/") + link)
-        if r.status_code >= 400:
-            raise GMError(f"{download!r} is not reachable through {self.base} (HTTP {r.status_code}) and "
-                          "op=artifact can only return one file; see `hunt openapi --grep artifact download`",
-                          r.status_code)
-        return Download(r.content, r.url, _filename(r), time.perf_counter() - t, len(r.history))
+            # Behind a path-prefixed proxy the links cannot be followed and a bare
+            # op=artifact returns one file only; the documented 'delivery' parameter
+            # selects each of them (0-based, in reply order).
+            jobs = [lambda i=i: self.artifact(challenge, delivery=i) for i in range(len(downloads))]
+        else:
+            jobs = [lambda d=d: self.artifact(challenge, d) for d in downloads]
+        with ThreadPoolExecutor(max_workers=min(8, len(jobs))) as pool:
+            got = list(pool.map(lambda job: job(), jobs))
+        if len({hashlib.sha256(g.data).digest() for g in got}) < len(got):
+            raise GMError(f"{len(downloads)} downloads were expected to differ but came back identical; "
+                          "refusing to solve copies of one file")
+        return got
 
 
 def _filename(r: requests.Response) -> str | None:

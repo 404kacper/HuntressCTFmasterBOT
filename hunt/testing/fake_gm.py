@@ -76,6 +76,7 @@ class Variant:
     zip_bytes: bytes
     questions: list[dict]
     truth: dict[str, str]  # question id -> answer
+    deliveries: list[bytes] = field(default_factory=list)  # several separate downloads (timed Mastery)
 
 
 def make_variant(rng: random.Random, mode: str = "trio") -> Variant:
@@ -152,6 +153,16 @@ class FakeGM:
         if self.prepare_delay:
             time.sleep(self.prepare_delay)
         v = make_variant(self.rng, self.mode)
+        if self.two_deliveries:
+            # Like the live timed Mastery variant: two separate downloads with the same file
+            # name, questions told apart by a "set" field (1-based).
+            parts = [make_variant(self.rng, "trio") for _ in range(2)]
+            qs, truth = [], {}
+            for n, part in enumerate(parts, 1):
+                for q in part.questions:
+                    qs.append({**q, "id": f"set{n}.{q['id']}", "set": n})
+                truth.update({f"set{n}.{k}": val for k, val in part.truth.items()})
+            v = Variant(parts[0].zip_bytes, qs, truth, [p.zip_bytes for p in parts])
         ids = {q["id"]: (secrets.token_hex(6) if self.opaque else q["id"]) for q in v.questions}
         deadline = datetime.now(timezone.utc) + timedelta(seconds=self.time_limit) if timed else None
         if timed:
@@ -174,9 +185,11 @@ class FakeGM:
             d["hall_of_fame_eligible"] = True
         if a.state in ("failed", "expired"):
             d["result"] = a.state
-        if self.two_deliveries:
+        if a.variant.deliveries:
             d.pop("download", None)
-            d["downloads"] = [f"/artifact/{a.id}/1", f"/artifact/{a.id}/2"]
+            d.pop("artifact_sha256", None)
+            d["downloads"] = [{"url": f"/artifact/{a.id}/{n}", "sha256": hashlib.sha256(z).hexdigest()}
+                              for n, z in enumerate(a.variant.deliveries, 1)]
         return d
 
     def _expired(self, a: _Attempt) -> bool:
@@ -282,12 +295,15 @@ class FakeGM:
                     return False
                 return True
 
-            def _artifact(self, attempt_id: str | None = None, delivery: str = "1"):
+            def _artifact(self, attempt_id: str | None = None, index: int = 0):
                 with gm.lock:
                     a = gm.attempt
                 if a is None or (attempt_id and attempt_id != a.id):
                     return self._send(404 if attempt_id else 409, b'{"error":"no such attempt"}', "application/json")
-                data = a.variant.zip_bytes if delivery == "1" else a.variant.zip_bytes + b"delivery-" + delivery.encode()
+                files = a.variant.deliveries or [a.variant.zip_bytes]
+                if not 0 <= index < len(files):
+                    return self._send(404, b'{"error":"no such delivery"}', "application/json")
+                data = files[index]
                 return self._send(200, data, "application/zip",
                                   {"Content-Disposition": f'attachment; filename="{ZIP_NAME}"'})
 
@@ -298,11 +314,11 @@ class FakeGM:
                 if gm.proxy_prefix and path.startswith(gm.proxy_prefix + "/"):
                     path = path[len(gm.proxy_prefix):]
                 if path.startswith("/artifact/"):
-                    parts = path.split("/")  # ['', 'artifact', id] or ['', 'artifact', id, n]
-                    return self._artifact(parts[2], parts[3] if len(parts) > 3 else "1")
+                    parts = path.split("/")  # ['', 'artifact', id] or ['', 'artifact', id, n (1-based)]
+                    return self._artifact(parts[2], int(parts[3]) - 1 if len(parts) > 3 else 0)
                 q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
                 if q.get("op") == "artifact":
-                    return self._artifact()
+                    return self._artifact(None, int(q.get("delivery") or 0))
                 code, data = gm.handle("GET", q, {})
                 self._send(code, json.dumps(data).encode(), "application/json")
 

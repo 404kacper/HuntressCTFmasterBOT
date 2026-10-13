@@ -251,20 +251,29 @@ class ArtifactSet:
             walk(t)
         return out
 
-    def top(self, name: str | None) -> Member | None:
+    def top(self, name: str | None, hint: int | None = None) -> Member | None:
+        """The downloaded artifact a label refers to. `hint` is a delivery index
+        (reply order) for when several downloads share a name."""
         if len(self.tops) == 1:
             return self.tops[0]  # the download name often differs from the label
+        if hint is not None:
+            if not 0 <= hint < len(self.tops):
+                return None
+            t = self.tops[hint]
+            named = [o for o in self.tops if name and _base_key(o.name) == _base_key(name)]
+            # Trust the hint unless the label names a *different* download outright.
+            return t if (not named or t in named) else None
         if not name:
             return None
         return _match(self.tops, name)
 
-    def resolve(self, chain: list[str] | tuple[str, ...]) -> Member | None:
+    def resolve(self, chain: list[str] | tuple[str, ...], hint: int | None = None) -> Member | None:
         if not chain:
             return None
-        cur = self.top(chain[0])
+        cur = self.top(chain[0], hint)
         if cur is None:
             return None
-        if len(self.tops) == 1 and _base_key(cur.name) != _base_key(chain[0]):
+        if _base_key(cur.name) != _base_key(chain[0]):
             # The download's own name differs from the label. If the label names
             # something inside it (Mastery: one zip holding evidence-01.zip and
             # evidence-02.zip), that inner member is what the question means.
@@ -272,7 +281,7 @@ class ArtifactSet:
             if inner is not None:
                 return inner
         hit = self._walk(cur, chain[1:])
-        if hit is None and len(self.tops) == 1:
+        if hit is None and (len(self.tops) == 1 or hint is not None):
             # The question may name the inner file without naming the container.
             hit = self._walk(cur, chain)
         return hit

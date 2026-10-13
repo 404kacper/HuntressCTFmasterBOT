@@ -11,12 +11,14 @@
   hunt offline CID                   re-solve the latest archived attempt, no network
   hunt replay [CID]                  regression: re-solve every archived CORRECT attempt
   hunt inspect CID                   what the Game Master sent for archived attempts (no network)
+  hunt fetch CID --delivery 0 1      download the current attempt's files and print their SHA-256
   hunt rehearse                      full race against a local fake Game Master
 """
 from __future__ import annotations
 
 import argparse
 import getpass
+import hashlib
 import json
 import os
 import re
@@ -156,6 +158,24 @@ def cmd_openapi(args) -> int:
                     print(f"{j + 1:6}: {lines[j]}")
                     shown.add(j)
         print(f"({len(hits)} matching line(s) for {', '.join(args.grep)})")
+    return 0
+
+
+def cmd_fetch(args) -> int:
+    """Download the current attempt's artifact(s) and print what came back. Read-only:
+    nothing is started, solved or submitted (use it to check delivery numbering)."""
+    gm = _gm(args)
+    cid, _ = _resolve(gm, args.challenge)
+    if cid is None:
+        return 2
+    for d in args.delivery or [None]:
+        try:
+            dl = gm.artifact(cid, delivery=d)
+        except GMError as e:
+            print(f"delivery={d}: {e}")
+            continue
+        print(f"delivery={'-' if d is None else d}  size={len(dl.data)}  "
+              f"sha256={hashlib.sha256(dl.data).hexdigest()}  filename={dl.filename!r}")
     return 0
 
 
@@ -548,6 +568,11 @@ def main(argv=None) -> int:
     p.add_argument("--grep", nargs="*", default=[], help="print lines mentioning these words (with context)")
     p.add_argument("--context", type=int, default=6)
     p.set_defaults(fn=cmd_openapi)
+
+    p = sub.add_parser("fetch", help="download the current attempt's artifact(s) and print their SHA-256 (read-only)")
+    p.add_argument("challenge")
+    p.add_argument("--delivery", type=int, nargs="*", help="delivery numbers to fetch (op=artifact&delivery=N)")
+    p.set_defaults(fn=cmd_fetch)
 
     p = sub.add_parser("inspect", help="show what the Game Master sent for archived attempts (no network)")
     p.add_argument("challenge")

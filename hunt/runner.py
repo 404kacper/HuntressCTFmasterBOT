@@ -109,12 +109,10 @@ def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_r
         run = _archive(archive, attempt, data, [], None, None, None, None)
         return Outcome("gm-error", str(e), attempt, run=run, timings=t)
 
-    if attempt.expected_sha256:
-        got = {hashlib.sha256(d.data).hexdigest() for d in downloads}
-        if not got <= attempt.expected_sha256:
-            run = _archive(archive, attempt, data, downloads, None, None, None, None)
-            return Outcome("wrong-artifact", "downloaded bytes do not match the artifact SHA-256 in the "
-                           "reply; refusing to answer for the wrong variant", attempt, run=run, timings=t)
+    problem, downloads = _verify_downloads(attempt, downloads)
+    if problem:
+        run = _archive(archive, attempt, data, downloads, None, None, None, None)
+        return Outcome("wrong-artifact", problem, attempt, run=run, timings=t)
 
     t2 = clock()
     arts = ArtifactSet([(d.filename or "", d.data) for d in downloads])
@@ -160,6 +158,27 @@ def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_r
     else:
         status = "dry-run"
     return Outcome(status, message.strip(), attempt, solution, decision, sent, reply, run, t, downloads)
+
+
+def _verify_downloads(attempt: Attempt, downloads: list[Download]) -> tuple[str | None, list[Download]]:
+    """Check fetched bytes against the SHA-256 values in the reply and put them in
+    reply order (download i <-> delivery i). Returns (problem, downloads)."""
+    got = [hashlib.sha256(d.data).hexdigest() for d in downloads]
+    if len(downloads) > 1 and len(set(got)) < len(got):
+        return "several downloads came back identical; refusing to answer for copies of one file", downloads
+    per = attempt.download_sha256
+    if len(per) == len(downloads) and all(per):
+        if got == per:
+            return None, downloads
+        if sorted(got) == sorted(per):  # same files, other order: follow the reply's order
+            by_sha = dict(zip(got, downloads))
+            return None, [by_sha[h] for h in per]
+        return ("downloaded bytes do not match the per-download SHA-256 values in the reply; refusing to "
+                "answer for the wrong files"), downloads
+    if attempt.expected_sha256 and not set(got) <= attempt.expected_sha256:
+        return ("downloaded bytes do not match the artifact SHA-256 in the reply; refusing to answer for "
+                "the wrong variant"), downloads
+    return None, downloads
 
 
 def _server_says_finished(data: dict) -> bool:
