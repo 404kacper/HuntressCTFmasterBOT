@@ -162,21 +162,43 @@ def cmd_openapi(args) -> int:
 
 
 def cmd_fetch(args) -> int:
-    """Download the current attempt's artifact(s) and print what came back. Read-only:
-    nothing is started, solved or submitted (use it to check delivery numbering)."""
+    """Download the current attempt's artifact(s) and compare them with what the reply
+    announced. Read-only: nothing is started, solved or submitted."""
+    if any(d < 0 for d in args.delivery or []):
+        print("delivery numbers cannot be negative")
+        return 2
     gm = _gm(args)
     cid, _ = _resolve(gm, args.challenge)
     if cid is None:
         return 2
+    try:
+        reply = gm.status(cid)
+    except GMError as e:
+        print(f"(status unavailable: {e})")
+        reply = {}
+    a = Attempt.from_response(cid, reply) if isinstance(reply, dict) else None
+    per = (a.download_sha256 if a else []) or []
+    if a and a.downloads:
+        print("the reply lists:")
+        for i, link in enumerate(a.downloads):
+            print(f"  download {i}: sha256={(per[i] if i < len(per) else None) or '?'}  link={link!r}")
+    failures = 0
     for d in args.delivery or [None]:
+        label = "-" if d is None else d
         try:
             dl = gm.artifact(cid, delivery=d)
         except GMError as e:
-            print(f"delivery={d}: {e}")
+            print(f"delivery={label}: {e}")
+            failures += 1
             continue
-        print(f"delivery={'-' if d is None else d}  size={len(dl.data)}  "
-              f"sha256={hashlib.sha256(dl.data).hexdigest()}  filename={dl.filename!r}")
-    return 0
+        h = hashlib.sha256(dl.data).hexdigest()
+        where = [i for i, x in enumerate(per) if x == h]
+        verdict = (f"matches download {where[0]}" if where else
+                   "MATCHES NOTHING the reply announced" if any(per) else "unknown (the reply gives no SHA-256)")
+        if any(per) and not where:
+            failures += 1
+        print(f"delivery={label}  size={len(dl.data)}  sha256={h}  filename={dl.filename!r}  -> {verdict}")
+    return 1 if failures else 0
 
 
 def cmd_inspect(args) -> int:

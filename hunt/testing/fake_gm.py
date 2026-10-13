@@ -140,6 +140,7 @@ class FakeGM:
         # instead of one zip of zips; op=artifact can only return the first.
         self.two_deliveries = two_deliveries
         self.proxy_passthrough = proxy_passthrough  # serve '<prefix>/artifact/...' links through the proxy
+        self.reverse_deliveries = False  # op=artifact&delivery=i counts from the other end (order test)
         self.timed_by_default, self.time_limit = timed_by_default, time_limit
         self.prepare_delay = prepare_delay  # the real server can take a while to prepare a variant
         self.rng = random.Random(seed)
@@ -307,6 +308,12 @@ class FakeGM:
                 return self._send(200, data, "application/zip",
                                   {"Content-Disposition": f'attachment; filename="{ZIP_NAME}"'})
 
+            def _by_delivery(self, index: int):
+                with gm.lock:
+                    a = gm.attempt
+                n = len(a.variant.deliveries) if a and a.variant.deliveries else 1
+                return self._artifact(None, n - 1 - index if gm.reverse_deliveries else index)
+
             def do_GET(self):
                 if not self._auth() or not self._routed():
                     return
@@ -318,7 +325,7 @@ class FakeGM:
                     return self._artifact(parts[2], int(parts[3]) - 1 if len(parts) > 3 else 0)
                 q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
                 if q.get("op") == "artifact":
-                    return self._artifact(None, int(q.get("delivery") or 0))
+                    return self._by_delivery(int(q.get("delivery") or 0))
                 code, data = gm.handle("GET", q, {})
                 self._send(code, json.dumps(data).encode(), "application/json")
 

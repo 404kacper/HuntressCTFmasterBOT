@@ -106,7 +106,7 @@ def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_r
         downloads = gm.artifacts(challenge, attempt.downloads)
         t["download"] = clock() - t1
     except GMError as e:
-        run = _archive(archive, attempt, data, [], None, None, None, None)
+        run = _archive(archive, attempt, data, getattr(e, "partial", []), None, None, None, None)
         return Outcome("gm-error", str(e), attempt, run=run, timings=t)
 
     problem, downloads = _verify_downloads(attempt, downloads)
@@ -164,17 +164,20 @@ def _verify_downloads(attempt: Attempt, downloads: list[Download]) -> tuple[str 
     """Check fetched bytes against the SHA-256 values in the reply and put them in
     reply order (download i <-> delivery i). Returns (problem, downloads)."""
     got = [hashlib.sha256(d.data).hexdigest() for d in downloads]
-    if len(downloads) > 1 and len(set(got)) < len(got):
+    n = len(downloads)
+    if n > 1 and len(set(got)) < n:
         return "several downloads came back identical; refusing to answer for copies of one file", downloads
-    per = attempt.download_sha256
-    if len(per) == len(downloads) and all(per):
-        if got == per:
-            return None, downloads
-        if sorted(got) == sorted(per):  # same files, other order: follow the reply's order
-            by_sha = dict(zip(got, downloads))
-            return None, [by_sha[h] for h in per]
-        return ("downloaded bytes do not match the per-download SHA-256 values in the reply; refusing to "
-                "answer for the wrong files"), downloads
+    per = attempt.download_sha256 if len(attempt.download_sha256) == n else []
+    known = [(i, h) for i, h in enumerate(per) if h]
+    if known:
+        if any(h not in got for _, h in known):
+            return ("downloaded bytes do not match the per-download SHA-256 values in the reply; refusing to "
+                    "answer for the wrong files"), downloads
+        ordered: list[Download | None] = [None] * n
+        for i, h in known:  # each file to the slot whose SHA-256 it has
+            ordered[i] = downloads[got.index(h)]
+        rest = iter(d for d in downloads if all(d is not o for o in ordered))
+        return None, [o if o is not None else next(rest) for o in ordered]
     if attempt.expected_sha256 and not set(got) <= attempt.expected_sha256:
         return ("downloaded bytes do not match the artifact SHA-256 in the reply; refusing to answer for "
                 "the wrong variant"), downloads

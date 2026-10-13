@@ -655,6 +655,67 @@ class AgainstFakeGameMaster(unittest.TestCase):
         o = play(GameMaster(url, fake.token), Archive(self.runs), CID, timed=True, use_retry=None, submit=True)
         self.assertEqual((o.reply or {}).get("result"), "CORRECT", o.message)
 
+    def _deliveries_reply(self, fake, reshape):
+        orig = fake._view
+
+        def view(a):
+            d = orig(a)
+            if a.variant.deliveries and "downloads" in d:
+                shas = [e["sha256"] for e in d.pop("downloads")]
+                d.update(reshape(a, shas))
+            return d
+        fake._view = view
+
+    def _race_ok(self, fake, url):
+        o = play(GameMaster(url, fake.token), Archive(self.runs), CID, timed=True, use_retry=None, submit=True)
+        return o, (o.reply or {}).get("result")
+
+    def test_delivery_reply_shapes(self):
+        op = f"?op=artifact&challenge={CID}"
+        shapes = {
+            "shared link, different sha": lambda a, h: {"downloads": [{"url": op, "sha256": h[0]}, {"url": op, "sha256": h[1]}]},
+            "link under 'link'": lambda a, h: {"downloads": [{"link": f"/artifact/{a.id}/{i + 1}", "sha256": x}
+                                                            for i, x in enumerate(h)]},
+            "no links, legacy download": lambda a, h: {"download": op, "deliveries": [{"filename": "x.zip", "sha256": x} for x in h]},
+            "nested checksums": lambda a, h: {"downloads": [{"url": f"/artifact/{a.id}/{i + 1}", "checksums": {"sha256": x}}
+                                                           for i, x in enumerate(h)]},
+            "only first sha": lambda a, h: {"downloads": [{"url": f"/artifact/{a.id}/1", "sha256": h[0]},
+                                                         {"url": f"/artifact/{a.id}/2"}]},
+            "dead links (404)": lambda a, h: {"downloads": [{"url": f"/missing/{i}", "sha256": x} for i, x in enumerate(h)]},
+        }
+        for proxy in ("", "/huntress-ctf-proxy"):
+            for name, reshape in shapes.items():
+                fake, url = self._fake(seed=40, root_links=True, proxy_prefix=proxy, two_deliveries=True)
+                self._deliveries_reply(fake, reshape)
+                o, result = self._race_ok(fake, url)
+                self.assertEqual(result, "CORRECT", f"{name} (proxy={proxy!r}): {o.status} {o.message}")
+
+    def test_server_numbering_differs_from_reply_order(self):
+        fake, url = self._fake(seed=41, root_links=True, proxy_prefix="/huntress-ctf-proxy", two_deliveries=True)
+        fake.reverse_deliveries = True
+        o, result = self._race_ok(fake, url)
+        self.assertEqual(result, "CORRECT", o.message)  # put back in reply order by checksum
+
+    def test_one_download_for_two_deliveries_is_held(self):
+        # Review finding: a legacy single download with set 1/2 questions answered set 2 from delivery 1.
+        fake, url = self._fake(seed=42, root_links=True, two_deliveries=True)
+        self._deliveries_reply(fake, lambda a, h: {"download": f"?op=artifact&challenge={CID}"})
+        o, result = self._race_ok(fake, url)
+        self.assertIsNone(o.sent)
+        self.assertEqual(o.status, "held")
+
+    def test_fetch_compares_with_the_reply(self):
+        fake, url = self._fake(seed=43, root_links=True, proxy_prefix="/huntress-ctf-proxy", two_deliveries=True)
+        GameMaster(url, fake.token).start(CID)
+        code, out = self._cli(fake, url, "fetch", CID, "--delivery", "0", "1")
+        self.assertEqual(code, 0, out)
+        self.assertIn("matches download 0", out)
+        self.assertIn("matches download 1", out)
+        code, out = self._cli(fake, url, "fetch", CID, "--delivery", "2")
+        self.assertEqual(code, 1, out)
+        code, out = self._cli(fake, url, "fetch", CID, "--delivery", "-1")
+        self.assertEqual(code, 2, out)
+
     def test_identical_deliveries_are_refused(self):
         fake, url = self._fake(seed=38, root_links=True, proxy_prefix="/huntress-ctf-proxy", two_deliveries=True)
         orig = fake._new
@@ -667,6 +728,7 @@ class AgainstFakeGameMaster(unittest.TestCase):
         o = play(GameMaster(url, fake.token), Archive(self.runs), CID, timed=True, use_retry=None, submit=True)
         self.assertIn(o.status, ("gm-error", "wrong-artifact"))
         self.assertIsNone(o.sent)
+        self.assertEqual(len(o.run.read_json("artifacts.json") or []), 2)  # the evidence is archived
 
     def test_ping_reports_round_trip_and_server_time(self):
         fake, url = self._fake(seed=16)
@@ -994,6 +1056,15 @@ class DeliveryLabels(unittest.TestCase):
     def test_no_hint_means_hold(self):
         z = "metadata-day-01-evidence.zip -> evidence-note.txt"
         dec = self._solve([self._q("a", z), self._q("b", z)])
+        self.assertEqual(dec.submit, {})
+
+    def test_one_fetched_download_but_two_deliveries_referenced(self):
+        # Review finding: only delivery 0 came back; set-2 questions with the same file names
+        # were answered from it at 0.99. Must hold instead.
+        z = "metadata-day-01-evidence.zip -> evidence-note.txt"
+        qs = [self._q("a", z, set=1), self._q("b", z, set=2)]
+        a = Attempt.from_response(CID, {"questions": qs, "answer_ids": ["a", "b"]})
+        dec = decide(a, solve(a, ArtifactSet(self._tops()[:1])))
         self.assertEqual(dec.submit, {})
 
     def test_reply_order_is_restored_from_checksums(self):

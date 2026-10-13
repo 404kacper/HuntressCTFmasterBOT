@@ -184,29 +184,60 @@ def _answer_ids(data: dict) -> list:
     return out
 
 
-def _download_entries(data: dict) -> list[tuple[str, str | None]]:
-    """(link, expected sha256 or None) for every download, in reply order."""
-    found: list[tuple[str, str | None]] = []
+_LINK_KEYS = ("url", "download", "href", "link", "path", "uri")
 
-    def take(v, sha=None):
+
+def _entry_sha(entry, depth: int = 0) -> str | None:
+    """The SHA-256 an entry declares, wherever it keeps it ('sha256', 'artifact_sha256',
+    'file_sha256', {'checksums': {'sha256': ...}}, 'sha256:<hex>')."""
+    if depth > 3 or not isinstance(entry, dict):
+        return None
+    for k, v in entry.items():
+        if isinstance(v, str) and "sha256" in str(k).lower():
+            h = v.split(":", 1)[1] if v.lower().startswith("sha256:") else v
+            if _HEX64.match(h):
+                return h.lower()
+    for v in entry.values():
+        if isinstance(v, dict) and (h := _entry_sha(v, depth + 1)):
+            return h
+    return None
+
+
+def _download_entries(data: dict) -> list[tuple[str, str | None]]:
+    """(link, expected sha256 or None) for every download, in reply order. A link
+    of '' means the entry has no usable link and must be fetched by its delivery
+    index. A list of downloads wins over a legacy single 'download' field."""
+    listed: list[tuple[str, str | None]] = []
+
+    def take(v):
         if isinstance(v, str) and v:
-            found.append((v, sha.lower() if isinstance(sha, str) and _HEX64.match(sha) else None))
+            listed.append((v, None))
         elif isinstance(v, dict):
-            take(v.get("url") or v.get("download") or v.get("href"), v.get("sha256") or v.get("artifact_sha256"))
+            link = next((v[k] for k in _LINK_KEYS if isinstance(v.get(k), str) and v[k]), "")
+            sha = _entry_sha(v)
+            if link or sha or v.get("filename") or v.get("name"):
+                listed.append((link, sha))
         elif isinstance(v, list):
             for x in v:
                 take(x)
 
-    take(data.get("download"), data.get("sha256") or data.get("artifact_sha256"))
-    for key in ("downloads", "artifacts", "deliveries"):
+    for key in ("downloads", "deliveries", "artifacts"):
         take(data.get(key))
     for task in data.get("tasks") or []:
-        if isinstance(task, dict):
-            take(task.get("download"), task.get("sha256"))
-    seen: dict[str, str | None] = {}
-    for url, sha in found:
-        seen[url] = seen.get(url) or sha
-    return list(seen.items())
+        if isinstance(task, dict) and task.get("download"):
+            listed.append((str(task["download"]), _entry_sha(task)))
+    if not listed:
+        single = data.get("download")
+        if isinstance(single, str) and single:
+            listed.append((single, _entry_sha({k: v for k, v in data.items()
+                                               if k in ("sha256", "artifact_sha256")})))
+        elif isinstance(single, dict):
+            take(single)
+    out: list[tuple[str, str | None]] = []
+    for entry in listed:  # drop exact repeats only: one link may serve several deliveries
+        if entry not in out:
+            out.append(entry)
+    return out
 
 
 def _collect_downloads(data: dict) -> list[str]:

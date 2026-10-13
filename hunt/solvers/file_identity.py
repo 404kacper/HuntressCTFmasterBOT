@@ -125,6 +125,12 @@ def located(q: Question, ctx: Context) -> tuple[list[str], int | None]:
 def subject(q: Question, ctx: Context) -> tuple[Member | None, float, str]:
     arts = ctx.artifacts
     chain, hint = located(q, ctx)
+    if len(arts.tops) == 1 and _delivery_number(q) is not None and \
+            len({x for x in (_delivery_number(o) for o in ctx.attempt.questions) if x is not None}) > 1 and \
+            (not chain or arts.resolve(chain[:1]) is arts.tops[0]):
+        # Questions point at several deliveries but only one download was fetched, and this
+        # one's label names that download itself (not a zip inside it): we may hold the wrong one.
+        return None, 0.0, "questions refer to several deliveries but only one download was fetched"
     if len(arts.tops) > 1 and hint is None and chain and \
             sum(1 for t in arts.tops if t.basename.casefold() == chain[0].rsplit("/", 1)[-1].casefold()) > 1:
         return None, 0.0, f"{len(arts.tops)} downloads share the name {chain[0]!r} and nothing says which one is meant"
