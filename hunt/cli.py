@@ -13,6 +13,11 @@
   hunt inspect CID                   what the Game Master sent for archived attempts (no network)
   hunt fetch CID --delivery 0 1      download the current attempt's files and print their SHA-256
   hunt rehearse                      full race against a local fake Game Master
+
+  hunt grind [CHALLENGE...] [--day N]  solve every challenge (all modes) until each one scores;
+                                     questions no handler knows are learned with Claude
+  hunt optimize CID --target-rank 3  race until you hold that place on the Hall of Fame
+  hunt learned                       what the bot has learned (learned/), and its status
 """
 from __future__ import annotations
 
@@ -27,6 +32,7 @@ import statistics
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -37,6 +43,8 @@ from . import config
 from .config import ConfigError
 from .gate import DEFAULT_MIN_CONFIDENCE, decide
 from .gm import GameMaster, GMError
+from .learn.library import Library
+from .learn.sandbox import Sandbox, SandboxError
 from .model import Attempt
 from .runner import Outcome, play
 from .solvers import solve
@@ -65,6 +73,29 @@ def _make_gm(args) -> GameMaster:
         token = config.clean_token(getpass.getpass(
             "Game Master token (typing is hidden; press Enter if you are on the Homebase VM): "))
     return GameMaster(base_url=args.url, token=token or "")
+
+
+@contextmanager
+def _solver(args):
+    """The sandbox worker loaded with learned/ (started now, before any clock), or
+    None when nothing has been learned: then built-in handlers run in process."""
+    mods = Library(args.learned).modules()
+    if not mods:
+        yield None
+        return
+    sb = Sandbox(mods)
+    try:
+        info = sb.start()
+    except SandboxError as e:
+        print(f"warning: learned handlers unavailable ({e}); using built-in handlers only")
+        yield None
+        return
+    for name, err in (info.get("errors") or {}).items():
+        print(f"warning: learned/{name}.py failed to load: {err.strip().splitlines()[-1]}")
+    try:
+        yield sb.solve
+    finally:
+        sb.close()
 
 
 # ---- printing --------------------------------------------------------------
@@ -356,14 +387,21 @@ def cmd_solve(args) -> int:
                   "run_for_time_supported=true, so it may begin a real countdown. Check `hunt list`, "
                   "then pass --accept-timer if that is what you want.")
             return 3
-    o = play(gm, Archive(args.runs), args.challenge, timed=False, use_retry=args.retry,
-             submit=args.submit, min_confidence=args.min_confidence, partial=args.partial,
-             prompt=None if args.yes else _human_prompt, trust_guessed_ids=args.trust_positional_ids)
+    with _solver(args) as solver:
+        o = play(gm, Archive(args.runs), args.challenge, timed=False, use_retry=args.retry,
+                 submit=args.submit, min_confidence=args.min_confidence, partial=args.partial,
+                 prompt=None if args.yes else _human_prompt, trust_guessed_ids=args.trust_positional_ids,
+                 solver=solver)
     _print_outcome(o)
     return 0 if o.status == "dry-run" else _exit_code(o)
 
 
 def cmd_race(args) -> int:
+    with _solver(args) as solver:
+        return _race(args, solver)
+
+
+def _race(args, solver) -> int:
     if args.repeat < 1 or args.gap < 0 or args.keep < 0 or args.pending_wait < 0:
         print("--repeat must be at least 1; --gap, --keep and --pending-wait cannot be negative")
         return 2
@@ -377,7 +415,7 @@ def cmd_race(args) -> int:
         return 2
     args.challenge = cid
     if not args.force:
-        rows = replay(archive, args.challenge, args.min_confidence, args.trust_positional_ids)
+        rows = replay(archive, args.challenge, args.min_confidence, args.trust_positional_ids, solver=solver)
         if not rows:
             print("refusing to race: the bot has not yet been proven CORRECT on this challenge.\n"
                   "  Practise without a clock first:\n"
@@ -421,7 +459,7 @@ def cmd_race(args) -> int:
             gm.warm(args.challenge)
         print(f"{f'[{i + 1}/{args.repeat}] ' if args.repeat > 1 else ''}asking for a timed attempt; preparing it "
               f"can take a while (up to {gm.prepare_timeout:.0f}s) and does not count on the clock...", flush=True)
-        o = _play_through_pending(gm, archive, args, use_retry, refuse)
+        o = _play_through_pending(gm, archive, args, use_retry, refuse, solver)
         result = str((o.reply or {}).get("result") or "")
         if o.status == "pending":
             print(f"stopping: {o.message}")
@@ -469,7 +507,8 @@ def cmd_race(args) -> int:
     return code
 
 
-def _play_through_pending(gm: GameMaster, archive: Archive, args, use_retry, refuse: set[str]) -> Outcome:
+def _play_through_pending(gm: GameMaster, archive: Archive, args, use_retry, refuse: set[str],
+                          solver=None) -> Outcome:
     """Run one timed attempt; if the Game Master has not yet advanced past the
     last solve (scoring still being confirmed), wait with backoff and ask again."""
     waited, delay = 0.0, 2.0
@@ -477,7 +516,7 @@ def _play_through_pending(gm: GameMaster, archive: Archive, args, use_retry, ref
         o = play(gm, archive, args.challenge, timed=True, use_retry=use_retry, submit=True,
                  min_confidence=args.min_confidence, partial=args.partial,
                  prompt=None if args.no_prompt else _human_prompt, trust_guessed_ids=args.trust_positional_ids,
-                 refuse=refuse)
+                 refuse=refuse, solver=solver)
         if o.status != "pending" or waited >= args.pending_wait:
             return o
         print(f"  {o.message}; asking again in {delay:.0f}s", flush=True)
@@ -523,7 +562,8 @@ def cmd_offline(args) -> int:
         print("nothing archived for that challenge")
         return 1
     attempt, arts = run.attempt(), run.artifact_set()
-    sol = solve(attempt, arts)
+    with _solver(args) as solver:
+        sol = (solver or solve)(attempt, arts)
     dec = decide(attempt, sol, args.min_confidence, args.trust_positional_ids)
     _print_outcome(Outcome("dry-run", f"re-solved {run.path} offline", attempt, sol, dec))
     if args.inventory:
@@ -532,7 +572,9 @@ def cmd_offline(args) -> int:
 
 
 def cmd_replay(args) -> int:
-    rows = replay(Archive(args.runs), args.challenge, args.min_confidence, args.trust_positional_ids)
+    with _solver(args) as solver:
+        rows = replay(Archive(args.runs), args.challenge, args.min_confidence, args.trust_positional_ids,
+                      solver=solver)
     if not rows:
         print("no archived CORRECT attempts yet")
         return 1
@@ -570,6 +612,231 @@ def cmd_rehearse(args) -> int:
     print(f"\n{ok}/{args.variants} timed variants CORRECT against the fake Game Master")
     return 0 if ok == args.variants else 1
 
+# ---- learning and racing for places ---------------------------------------------
+def _pick_entries(rows: list[dict], wanted: list[str]) -> tuple[list[dict], list[str]]:
+    """Every challenge (all modes) matching each id or name; and the names that matched nothing."""
+    picked: list[dict] = []
+    missing = []
+    for w in wanted:
+        exact = [r for r in rows if r.get("id") == w]
+        key = _norm(w)
+        hits = exact or [r for r in rows if key and (key == _norm(r.get("name", "")) or
+                                                     key in _norm(r.get("name", "")) + " " + _norm(r.get("id", "")))]
+        if not hits:
+            missing.append(w)
+        for r in hits:
+            if r not in picked:
+                picked.append(r)
+    return picked, missing
+
+
+def cmd_grind(args) -> int:
+    from .learn.advisor import AdvisorError, pick
+    from .learn.grind import GrindOptions, grind
+
+    if args.rounds < 1 or args.episodes < 0 or args.fresh_variants < 0:
+        print("--rounds must be at least 1; --episodes and --fresh-variants cannot be negative")
+        return 2
+    gm = _gm(args)
+    rows = gm.list(day=args.day, lane=args.lane)
+    if args.challenges:
+        rows, missing = _pick_entries(rows, args.challenges)
+        for w in missing:
+            print(f"no challenge matches {w!r} (see `hunt list`)")
+        if missing and not rows:
+            return 2
+    if not rows:
+        print("no challenges to grind")
+        return 1
+    try:
+        advisor, how = pick(args.advisor, args.model, Path(args.learned) / "inbox")
+    except AdvisorError as e:
+        print(f"advisor: {e}")
+        return 2
+    print(f"advisor: {how}")
+    if advisor is not None:
+        print("  (questions and artifact previews go to Claude; the Game Master token never does)")
+    opts = GrindOptions(rounds=args.rounds, episodes=args.episodes, fresh_variants=args.fresh_variants,
+                        min_confidence=args.min_confidence, trust_guessed_ids=args.trust_positional_ids,
+                        accept_timer=args.accept_timer, submit=not args.no_submit, one_by_one=not args.batch)
+    results = grind(gm, Archive(args.runs), Library(args.learned), advisor, rows, opts)
+    print("\n== summary")
+    for r in results:
+        print(f"  {'+' if r.points else '-'} {r.status:8} {r.challenge}  {r.detail}"
+              + (f"  [learned: {', '.join(r.learned)}]" if r.learned else ""))
+    scored = sum(r.points for r in results)
+    print(f"\n{scored}/{len(results)} challenge mode(s) have scored.")
+    if any(r.pending for r in results):
+        print("Some solves say scoring is pending: CourseStack is the official ledger, check the points there.")
+    if any(r.learned for r in results):
+        print(f"New handlers are in {args.learned}/. Commit them (git add {args.learned}) so Homebase gets them "
+              "with `git pull`.")
+    return 0 if scored == len(results) else 1
+
+
+def cmd_optimize(args) -> int:
+    from .optimize import Board
+
+    if args.target_rank < 1 or args.max_runs < 1 or args.patience < 1 or args.keep < 0 or args.gap < 0:
+        print("--target-rank, --max-runs and --patience must be at least 1; --keep and --gap cannot be negative")
+        return 2
+    archive = Archive(args.runs)
+    gm = _gm(args)
+    cid, route = _resolve(gm, args.challenge)
+    if cid is None:
+        return 2
+    args.challenge = cid
+    if route is not None and not route.get("run_for_time_supported"):
+        print("refusing: this route does not list run_for_time_supported, so there is no opt-in timed race to optimise")
+        return 2
+    with _solver(args) as solver:
+        rows = replay(archive, cid, args.min_confidence, args.trust_positional_ids, solver=solver)
+    if not rows:
+        if args.no_learn:
+            print("refusing: the bot has never been CORRECT on this challenge (run `hunt grind` first)")
+            return 3
+        print("never CORRECT on this challenge yet: grinding it first (untimed)...")
+        from .learn.advisor import pick
+        from .learn.grind import MODE_ORDER, GrindOptions, grind, mode
+        from .learn.packet import base_id
+        advisor, how = pick(args.advisor, args.model, Path(args.learned) / "inbox")
+        print(f"advisor: {how}")
+        try:  # the modes before this one unlock it, so they come first
+            chain = [r for r in gm.list() if base_id(str(r.get("id"))) == base_id(cid)
+                     and MODE_ORDER.get(mode(str(r.get("id"))), 9) <= MODE_ORDER.get(mode(cid), 9)]
+        except GMError:
+            chain = []
+        res = grind(gm, archive, Library(args.learned), advisor, chain or [route or {"id": cid}],
+                    GrindOptions(min_confidence=args.min_confidence, trust_guessed_ids=args.trust_positional_ids))
+        if not res or res[-1].challenge != cid or not res[-1].points:
+            print("stopping: the challenge has not scored, so racing it would only burn ranked attempts")
+            return 1
+        with _solver(args) as solver:
+            rows = replay(archive, cid, args.min_confidence, args.trust_positional_ids, solver=solver)
+    if not rows or not all(r["ok"] for r in rows):
+        print("refusing: archived CORRECT attempts do not reproduce (see `hunt replay`)")
+        return 3
+    me = args.me
+    try:
+        st = gm.status(cid)
+    except GMError:
+        st = {}
+    if not me and isinstance(st.get("solved_by"), dict):
+        me = st["solved_by"].get("name")
+    board = Board(gm, cid, me=me, beat=args.beat)
+    ops = board.discover()
+    print("standing from: reply rank fields"
+          + (f", then op={'/'.join(ops)}" if ops else "")
+          + (f", else --beat {args.beat:.3f}s" if args.beat is not None else "")
+          + (f"   (you are {me!r})" if me else ""))
+    if not ops and args.beat is None:
+        print("note: the Game Master lists no leaderboard operation; unless its replies carry a rank, give the "
+              "time of the place you want with --beat SECONDS (read it off the Hall of Fame)")
+    left = _ranked_left(st)
+    if left is None:
+        print("refusing: cannot read ranked_attempts_remaining, so the reserve (--keep) cannot be protected")
+        return 2
+    gm.warm(cid, tuple(_known_artifact_hosts(archive, cid)))
+    refuse: set[str] = set()
+    times: list[float] = []
+    best_at = 0
+    code = 1
+    with _solver(args) as solver:
+        for i in range(args.max_runs):
+            if left is not None and left <= args.keep:
+                print(f"stopping: {left} ranked attempt(s) left, keeping {args.keep} in reserve (--keep)")
+                break
+            if i:
+                time.sleep(args.gap)
+                gm.warm(cid)
+            print(f"[{i + 1}/{args.max_runs}] timed attempt...", flush=True)
+            o = _play_through_pending(gm, archive, args, None, refuse, solver)
+            result = str((o.reply or {}).get("result") or "")
+            if o.status == "pending":
+                print(f"stopping: {o.message}")
+                break
+            if not (o.status == "submitted" and result.upper() == "CORRECT"):
+                _print_outcome(o)
+                code = _exit_code(o)
+                break
+            if o.attempt:
+                if o.attempt.attempt_id:
+                    refuse.add(o.attempt.attempt_id)
+                refuse |= o.attempt.expected_sha256
+            t = o.timings.get("on-clock(approx)", 0.0)
+            times.append(t)
+            if t <= min(times):
+                best_at = len(times)
+            left = _ranked_left(o.attempt.raw if o.attempt else {})
+            try:
+                after = gm.status(cid) if board.working_op is None else None
+            except GMError:
+                after = None
+            standing = board.standing(o.reply, after)
+            official = f", official {standing.seconds:.3f}s" if standing.seconds is not None else ""
+            place = (f"place {standing.rank}" + (f"/{standing.total}" if standing.total else "")
+                     if standing.rank else "place unknown")
+            print(f"  CORRECT on-clock<= {t * 1000:.0f} ms (best {min(times) * 1000:.0f}){official}  {place} "
+                  f"[{standing.source}]  ranked left: {left if left is not None else '?'}")
+            if o.attempt and o.attempt.raw.get("hall_of_fame_eligible") is False:
+                print("stopping: the Game Master says these attempts are not Hall of Fame eligible")
+                break
+            if standing.rank is not None and standing.rank <= args.target_rank:
+                print(f"done: place {standing.rank} (target {args.target_rank})")
+                code = 0
+                break
+            if args.beat is not None and standing.rank is None:
+                mine = standing.seconds if standing.seconds is not None else min(times)
+                if mine <= args.beat:
+                    print(f"done: {mine:.3f}s beats the {args.beat:.3f}s you set (--beat)")
+                    code = 0
+                    break
+            if len(times) - best_at >= args.patience:
+                print(f"stopping: no faster run in the last {args.patience} (plateau). Best on-clock "
+                      f"{min(times) * 1000:.0f} ms. The rest is network distance: try the machine `hunt ping` "
+                      "shows closest to the Game Master.")
+                break
+            if left is None:
+                print("stopping: cannot read ranked_attempts_remaining any more")
+                break
+        else:
+            print(f"stopping: --max-runs {args.max_runs} reached")
+    if board.raw_example is not None and board.working_op is None:
+        print("note: a leaderboard reply came back that the bot could not read; its shape: "
+              + json.dumps(board.raw_example, ensure_ascii=False)[:600])
+    return code
+
+
+def cmd_learned(args) -> int:
+    from .learn import policy
+
+    lib = Library(args.learned)
+    if args.reject:
+        dest = lib.reject(args.reject, "rejected by hand")
+        print(f"moved to {dest}" if dest else f"no learned/{args.reject}.py")
+        return 0 if dest else 1
+    if args.show:
+        p = lib.root / f"{args.show}.py"
+        if not p.exists():
+            print(f"no {p}")
+            return 1
+        print(p.read_text(encoding="utf-8"))
+        problems = policy.check(p.read_text(encoding="utf-8"))
+        if problems:
+            print("\nREFUSED by the policy (the sandbox will not load it):\n  " + "\n  ".join(problems))
+        return 0
+    names = lib.names()
+    if not names:
+        print(f"nothing learned yet ({lib.root}/ is empty). `hunt grind` fills it.")
+        return 0
+    man = lib.manifest()["modules"]
+    bad = lib.problems()
+    for n in names:
+        e = man.get(n, {})
+        print(f"{n:32} {e.get('status', 'candidate'):9} proven on: {', '.join(e.get('proven_on') or []) or '-'}"
+              + (f"   REFUSED: {bad[n][0]}" if n in bad else ""))
+    return 0
+
 
 def main(argv=None) -> int:
     _utf8_stdio()
@@ -577,6 +844,7 @@ def main(argv=None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--runs", default="runs", help="archive directory (default: ./runs)")
     ap.add_argument("--url", help="Game Master URL (default: $HUNTRESS_GM_URL, $GM, or the direct URL)")
+    ap.add_argument("--learned", default="learned", help="learned handlers directory (default: ./learned)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("list")
@@ -668,6 +936,49 @@ def main(argv=None) -> int:
     p.add_argument("--opaque-ids", action="store_true")
     p.add_argument("--min-confidence", type=float, default=DEFAULT_MIN_CONFIDENCE)
     p.set_defaults(fn=cmd_rehearse)
+
+    p = sub.add_parser("grind", help="solve challenges (all modes) until each scores; learn unknown questions")
+    p.add_argument("challenges", nargs="*", help="ids or names (default: everything `list` returns)")
+    p.add_argument("--day", type=int)
+    p.add_argument("--lane")
+    p.add_argument("--advisor", choices=("auto", "api", "cli", "manual", "none"), default="auto",
+                   help="who writes new handlers (default auto: API key, else `claude` CLI, else manual)")
+    p.add_argument("--model", help="Claude model for the advisor (default claude-opus-5-5 or $HUNT_CLAUDE_MODEL)")
+    p.add_argument("--rounds", type=int, default=4, help="advisor replies per learning episode (default 4)")
+    p.add_argument("--episodes", type=int, default=3, help="learning episodes per challenge (default 3)")
+    p.add_argument("--fresh-variants", type=int, default=1,
+                   help="fresh regular variants to spend when an attempt is lost (default 1)")
+    p.add_argument("--no-submit", action="store_true", help="learn and prove offline, send nothing")
+    p.add_argument("--batch", action="store_true",
+                   help="submit all answers in one request (default: one by one, so a refusal names the wrong one)")
+    p.add_argument("--accept-timer", action="store_true",
+                   help="include Time Trial / Mastery routes that do not say their start is untimed")
+    p.add_argument("--min-confidence", type=float, default=DEFAULT_MIN_CONFIDENCE)
+    p.add_argument("--trust-positional-ids", action="store_true")
+    p.set_defaults(fn=cmd_grind)
+
+    p = sub.add_parser("optimize", help="race until you hold the target place on the Hall of Fame")
+    p.add_argument("challenge")
+    p.add_argument("--target-rank", type=int, default=3)
+    p.add_argument("--beat", type=float, help="seconds: the time of the place you want (when no rank is readable)")
+    p.add_argument("--me", help="your team/player name on the board (default: solved_by from status)")
+    p.add_argument("--max-runs", type=int, default=20)
+    p.add_argument("--patience", type=int, default=6, help="stop after this many runs without a new best")
+    p.add_argument("--keep", type=int, default=3, help="ranked attempts to keep in reserve (default 3)")
+    p.add_argument("--gap", type=float, default=3.0)
+    p.add_argument("--wait", type=float, default=180.0)
+    p.add_argument("--pending-wait", type=float, default=60.0)
+    p.add_argument("--no-learn", action="store_true", help="never grind first; refuse if not yet proven")
+    p.add_argument("--advisor", choices=("auto", "api", "cli", "manual", "none"), default="auto")
+    p.add_argument("--model", help="Claude model for the advisor, if it has to learn first")
+    p.add_argument("--no-prompt", action="store_true")
+    gate_opts(p)
+    p.set_defaults(fn=cmd_optimize)
+
+    p = sub.add_parser("learned", help="list learned handlers (learned/) and their status")
+    p.add_argument("--show", metavar="NAME", help="print one module")
+    p.add_argument("--reject", metavar="NAME", help="move a module out of use")
+    p.set_defaults(fn=cmd_learned)
 
     args = ap.parse_args(argv)
     try:

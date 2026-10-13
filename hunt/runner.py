@@ -23,6 +23,9 @@ from .solvers import Solution, load_handlers, solve
 # Called when the gate held something and a human is available. Returns
 # "y" (send the confident answers), "a" (also send the low-confidence ones) or "n".
 Prompt = Callable[[Attempt, Decision, Solution], str]
+# (attempt, artifacts) -> Solution. Default: built-in handlers in this process;
+# with learned handlers, the sandbox worker's solve (hunt.learn.sandbox).
+Solver = Callable[[Attempt, ArtifactSet], Solution]
 
 
 @dataclass
@@ -42,7 +45,7 @@ class Outcome:
 def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_retry: bool | None,
          submit: bool, min_confidence: float = DEFAULT_MIN_CONFIDENCE, partial: bool = False,
          prompt: Prompt | None = None, trust_guessed_ids: bool = False,
-         refuse: set[str] | None = None) -> Outcome:
+         refuse: set[str] | None = None, solver: Solver | None = None) -> Outcome:
     """use_retry: True sends op=retry, False sends start. None (auto) sends
     start, and if that only reconnects to a finished attempt, follows with
     retry. Reconnecting starts no clock, so the extra request costs no time.
@@ -116,7 +119,7 @@ def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_r
 
     t2 = clock()
     arts = ArtifactSet([(d.filename or "", d.data) for d in downloads])
-    solution = solve(attempt, arts)
+    solution = (solver or solve)(attempt, arts)
     decision = decide(attempt, solution, min_confidence, trust_guessed_ids)
     t["solve"] = clock() - t2
 

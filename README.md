@@ -1,8 +1,10 @@
 # HuntressCTFmasterBOT
 
 A deterministic solver for the Huntress CTF 2026 Game Master. The AI's job is
-to *write handlers* for this bot while nothing is timed. The bot's job is to
-replay them, with no model calls, when the clock is running.
+to *write handlers* for this bot while nothing is timed. `hunt grind` does that
+on its own, asking Claude whenever it meets a question it cannot answer. The
+bot's job is to replay those handlers, with no model calls, when the clock is
+running.
 
 ```
 untimed (learn + prove)                          timed (race)
@@ -41,6 +43,78 @@ If `solve` says the challenge is *already solved*, run `py -m hunt solve <challe
 for a fresh untimed copy, then `py -m hunt solve <challenge-id> --submit`. If `list`
 says **START IS TIMED**, there is no untimed copy: go straight to
 `py -m hunt race <challenge-id> --force`.
+
+## Autopilot: `grind` (points) and `optimize` (leaderboard)
+
+Two goals, two commands.
+
+**Points: `hunt grind`.** It walks the challenges and stops once every one has scored (a CORRECT
+reply from the Game Master = flag + CourseStack points). Modes run in unlock order: Single Solve,
+then Time Trial, then Mastery. All attempts are untimed, so no clock and no ranked attempt is spent.
+
+```powershell
+py -m hunt grind --day 2                 # every challenge of day 2, all modes
+py -m hunt grind "A Little Based"        # one challenge, all of its modes
+py -m hunt grind --day 2 --no-submit     # learn and prove offline, send nothing
+py -m hunt learned                       # what the bot has learned so far
+```
+
+For each challenge, grind starts (or reconnects to) an untimed attempt and solves it with
+everything the bot knows. If every answer passes the gate, it submits. If some question has no
+handler, it **asks Claude to write one** and goes back and forth with it:
+
+1. Claude gets a packet: the challenge text, every question with what the bot already answered,
+   an inventory of the downloaded files, and previews of their contents. It also gets earlier
+   variants with the answers the Game Master accepted, plus the handlers learned so far.
+2. Claude replies with one Python module. The bot checks it against a strict policy: allowlisted
+   stdlib imports only, and no files, network, processes, `eval`, or dunder tricks. It then runs
+   the module in a **sandbox process** started with `-I -S`, an empty environment (no Game Master
+   token, no API key), an empty folder, and an audit hook that refuses network, processes and
+   file access.
+3. The module must answer every held question in the declared format and still reproduce every
+   archived CORRECT attempt. If it doesn't, the exact problem goes back to Claude: the policy
+   violation, the traceback, the gate's objection, or the broken regression. Claude replies with
+   a fixed module, and this repeats for up to `--rounds` replies.
+4. Once it passes, the module is saved in `learned/` and the attempt is submitted **one answer at
+   a time**, answers from proven handlers first. The Game Master keeps correct partial progress,
+   so if it refuses an answer, the bot knows exactly which handler was wrong. That handler is
+   rejected, and the refusal goes back to Claude.
+5. On CORRECT, the module is marked *proven*. Every later variant, timed race and day reuses it
+   with no AI in the loop.
+
+Who plays Claude (`--advisor`, default `auto` picks the first that works):
+
+| advisor | needs | notes |
+|---|---|---|
+| `api` | `py -m pip install anthropic` plus `ANTHROPIC_API_KEY` (or `ant auth login`) | model `claude-opus-5-5` (`--model` / `HUNT_CLAUDE_MODEL`), refusal fallback on |
+| `cli` | Claude Code installed (`claude`) | runs `claude -p` with **all tools off**: it can only read the packet and reply |
+| `manual` | you | writes `learned/inbox/<challenge>-roundN.md`; you paste it into Claude and save the reply next to it |
+| `none` | - | known questions only; for the rest, a `packet.md` is saved in the run folder |
+
+Run grind **on your PC**, not on Homebase: an API key is a credential, and Huntress asks you not to
+put credentials into Homebase. Then commit `learned/` (`git add learned; git commit`) and
+`git pull` on Homebase so the racing machine knows the same tricks.
+
+**Leaderboard: `hunt optimize`.** It races a challenge until you hold the target place.
+
+```powershell
+py -m hunt optimize <challenge-id> --target-rank 3
+py -m hunt optimize <challenge-id> --target-rank 3 --beat 0.330   # if no rank can be read: the 3rd place time
+```
+
+If the bot has never been CORRECT on the challenge, optimize grinds it first (untimed). Then it
+runs timed attempts back to back and reads your place after each CORRECT. The place comes from a
+rank field in the Game Master's reply, a leaderboard operation in its OpenAPI document, or, failing
+both, your `--beat` time. It stops at the first of these:
+
+- the target place
+- `--keep` ranked attempts left
+- `--patience` runs with no new best
+- `--max-runs`
+- any result that is not CORRECT
+
+If the best time stops improving, the remaining time is network distance: run `hunt ping` on each
+machine and race from the closer one.
 
 ## Token
 
@@ -143,3 +217,9 @@ generality are sound. It does not show that the real server agrees.
 - Artifacts are parsed in memory and never executed. Archived copies are stored
   as `<sha256>.bin`. Nested archives are expanded lazily, with depth and size limits.
 - `runs/` is git-ignored: it holds untrusted bytes.
+- Code Claude writes never runs in the bot's own process (the one holding the token). It must
+  first pass `hunt/learn/policy.py`. It then runs only inside the sandbox worker
+  (`hunt/learn/worker.py`): a separate Python with no token, no API key and an empty folder,
+  whose audit hook refuses network, processes and file access outside the Python installation.
+  Packets fence artifact content as untrusted data, because CTF files can carry prompt injection.
+  They never contain the token.

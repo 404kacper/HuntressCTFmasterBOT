@@ -102,17 +102,28 @@ class Archive:
 
 
 def replay(archive: Archive, challenge: str | None = None,
-           min_confidence: float = DEFAULT_MIN_CONFIDENCE, trust_guessed_ids: bool = False) -> list[dict]:
+           min_confidence: float = DEFAULT_MIN_CONFIDENCE, trust_guessed_ids: bool = False,
+           solver=None, latest: int | None = None) -> list[dict]:
     """Re-solve every archived CORRECT attempt offline and compare with what
     the Game Master accepted, under the same gate settings a race would use:
-    an answer the gate would hold counts as a failure. One row per run."""
+    an answer the gate would hold counts as a failure. One row per run.
+    solver: (attempt, artifacts) -> Solution (default: in process, built-in
+    handlers only). latest: only the newest N CORRECT runs of each challenge."""
     rows = []
-    for run in archive.runs(challenge):
+    picked: list[tuple[Run, dict]] = []
+    per: dict[str, int] = {}
+    for run in reversed(archive.runs(challenge)):
         truth = run.correct_answers()
         if not truth:
             continue
+        key = run.path.parent.name
+        if latest is not None and per.get(key, 0) >= latest:
+            continue
+        per[key] = per.get(key, 0) + 1
+        picked.append((run, truth))
+    for run, truth in reversed(picked):
         attempt = run.attempt()
-        sol = solve(attempt, run.artifact_set())
+        sol = (solver or solve)(attempt, run.artifact_set())
         dec = decide(attempt, sol, min_confidence, trust_guessed_ids)
         ids = attempt.answer_id_map()[0]
         qs = {ids[q.id]: q for q in attempt.questions if q.id in ids}

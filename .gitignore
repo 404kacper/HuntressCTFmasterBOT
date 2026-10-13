@@ -11,3 +11,5 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+# advisor inbox: packets carry artifact previews (untrusted bytes)
+learned/inbox/
