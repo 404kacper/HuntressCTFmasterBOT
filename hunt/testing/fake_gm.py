@@ -159,6 +159,8 @@ class FakeGM:
         if a.deadline:
             d["deadline"] = a.deadline.isoformat().replace("+00:00", "Z")
             d["hall_of_fame_eligible"] = True
+        if a.state in ("failed", "expired"):
+            d["result"] = a.state
         return d
 
     def _expired(self, a: _Attempt) -> bool:

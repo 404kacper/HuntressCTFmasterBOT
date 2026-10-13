@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -16,7 +17,7 @@ from .forensics.artifacts import ArtifactSet
 from .forensics.identity import inventory
 from .gate import DEFAULT_MIN_CONFIDENCE, Decision, decide
 from .gm import Download, GameMaster, GMError
-from .model import Attempt
+from .model import TERMINAL_RESULTS, Attempt
 from .solvers import Solution, load_handlers, solve
 
 # Called when the gate held something and a human is available. Returns
@@ -54,9 +55,16 @@ def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_r
             data = gm.retry(challenge, run_for_time=rft)
         else:
             data = gm.start(challenge, run_for_time=rft)
-            if use_retry is None and _finished(challenge, data):
-                t0 = clock()
-                data = gm.retry(challenge, run_for_time=rft)
+            if use_retry is None and _finished(challenge, data, gm.server_now()):
+                t_start = clock()
+                try:
+                    data = gm.retry(challenge, run_for_time=rft)
+                    t0 = t_start
+                except GMError as e:
+                    # "Finish the current attempt first": the server says it is still live, so our
+                    # deadline arithmetic was wrong. Carry on with the attempt start gave us.
+                    if e.transport or e.status != 409 or _server_says_finished(data):
+                        raise
     except GMError as e:
         if e.transport and timed:
             return Outcome("gm-error", f"no reply from the Game Master: {e}. It may still have opened a timed "
@@ -137,15 +145,20 @@ def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_r
     return Outcome(status, message.strip(), attempt, solution, decision, sent, reply, run, t, downloads)
 
 
-def _finished(challenge: str, data: dict) -> bool:
-    """A reconnect to an attempt that is already solved or expired (whether or
-    not the reply still carries its download link), including a timed attempt
-    whose deadline has passed, e.g. one a failed earlier race left behind."""
-    a = Attempt.from_response(challenge, data)
-    if (a.result or "").upper() in ("CORRECT", "EXPIRED") or data.get("solved_by"):
+def _server_says_finished(data: dict) -> bool:
+    return str(data.get("result") or "").upper() in TERMINAL_RESULTS or bool(data.get("solved_by"))
+
+
+def _finished(challenge: str, data: dict, server_now: datetime | None = None) -> bool:
+    """A reconnect to an attempt that can no longer be answered: solved,
+    failed or expired (whether or not the reply still carries its download
+    link), including a timed attempt whose deadline has passed, e.g. one a
+    failed earlier race left behind. The deadline is judged on the server's
+    clock with a margin for the Date header's one-second resolution."""
+    if _server_says_finished(data):
         return True
-    left = a.seconds_left()
-    return left is not None and left <= 0
+    left = Attempt.from_response(challenge, data).seconds_left(server_now)
+    return left is not None and left < -2
 
 
 def _no_artifact_message(a: Attempt) -> str:

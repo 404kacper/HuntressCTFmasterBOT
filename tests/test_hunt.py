@@ -13,6 +13,7 @@ import unittest
 import warnings
 import zipfile
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -514,6 +515,41 @@ class AgainstFakeGameMaster(unittest.TestCase):
         fake._view = lambda a: {**orig(a), "download": "/artifact/not-this-one"}
         o = play(GameMaster(url, fake.token), Archive(self.runs), CID, timed=True, use_retry=None, submit=True)
         self.assertEqual((o.reply or {}).get("result"), "CORRECT")
+
+    def test_pc_clock_ahead_does_not_abandon_a_live_attempt(self):
+        # Review finding: deadlines judged on the local clock made race retry on a live attempt.
+        fake, url = self._fake(seed=22, timed_by_default=True, time_limit=60)
+        ahead = lambda: datetime.now(timezone.utc) + timedelta(seconds=90)
+        with mock.patch("hunt.model.utcnow", ahead), mock.patch("hunt.gm.utcnow", ahead):
+            code, out = self._cli(fake, url, "race", CID, "--force", "--no-prompt")
+        self.assertEqual(code, 0, out)
+        self.assertIn("ahead of", out)
+        self.assertEqual((len(fake.history), fake.attempt.state), (1, "solved"))
+
+    def test_server_409_keeps_the_live_attempt(self):
+        fake, url = self._fake(seed=23, timed_by_default=True, time_limit=60)
+        gm = GameMaster(url, fake.token)
+        gm.server_now = lambda: datetime.now(timezone.utc) + timedelta(hours=1)  # no usable clock
+        o = play(gm, Archive(self.runs), CID, timed=True, use_retry=None, submit=True)
+        self.assertEqual((o.reply or {}).get("result"), "CORRECT")
+        self.assertEqual(len(fake.history), 1)
+
+    def test_failed_attempt_is_left_for_a_fresh_one(self):
+        fake, url = self._fake(seed=24, time_limit=60)
+        gm = GameMaster(url, fake.token)
+        gm.start(CID, run_for_time=True)
+        gm.submit(CID, {"evidence-note-md5": "0" * 32})  # one wrong answer fails the attempt
+        self.assertEqual(fake.attempt.state, "failed")
+        code, out = self._cli(fake, url, "race", CID, "--force", "--no-prompt")
+        self.assertEqual(code, 0, out)
+        self.assertEqual((len(fake.history), fake.attempt.state), (2, "solved"))
+
+    def test_race_exit_code_reflects_the_verdict(self):
+        fake, url = self._fake(seed=25)
+        fake._submit = lambda answers: (200, {"result": "incorrect"})
+        code, out = self._cli(fake, url, "race", CID, "--force", "--no-prompt")
+        self.assertEqual(code, 4, out)
+        self.assertIn("NOT SOLVED", out)
 
     def test_ping_reports_round_trip_and_server_time(self):
         fake, url = self._fake(seed=16)

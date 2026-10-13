@@ -11,12 +11,15 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timedelta
+from email.utils import parsedate_to_datetime
 from urllib.parse import unquote, urljoin, urlsplit
 
 import requests
 from requests.adapters import HTTPAdapter
 
 from . import config
+from .model import utcnow
 
 
 class GMError(RuntimeError):
@@ -66,6 +69,7 @@ class GameMaster:
         # start/retry can wait while the Game Master prepares a fresh variant;
         # that wait is not on the clock, so give it room instead of giving up.
         self.prepare_timeout = prepare_timeout
+        self.clock_offset: float | None = None  # server clock minus ours, seconds (from Date headers)
         s = requests.Session()
         s.trust_env = config.proxy_env_present()
         adapter = HTTPAdapter(pool_connections=4, pool_maxsize=8, max_retries=0)
@@ -81,7 +85,21 @@ class GameMaster:
         self.s = s
 
     # ---- transport -------------------------------------------------------
+    def _note_server_time(self, r: requests.Response) -> None:
+        date = r.headers.get("Date")
+        if not date:
+            return
+        try:
+            self.clock_offset = (parsedate_to_datetime(date) - utcnow()).total_seconds()
+        except (TypeError, ValueError):
+            pass
+
+    def server_now(self) -> datetime:
+        """The Game Master's idea of 'now' (local clock + offset from its Date header)."""
+        return utcnow() + timedelta(seconds=self.clock_offset or 0.0)
+
     def _decode(self, r: requests.Response):
+        self._note_server_time(r)
         try:
             data = r.json()
         except ValueError:
@@ -112,8 +130,10 @@ class GameMaster:
     def warm(self, challenge: str | None = None, extra_urls: tuple[str, ...] = ()) -> None:
         """Open (and keep alive) the connections the timed path will use."""
         try:
-            self.s.get(self.base, params={"op": "status", "challenge": challenge} if challenge
-                       else {"op": "list"}, timeout=self.timeout).content
+            r = self.s.get(self.base, params={"op": "status", "challenge": challenge} if challenge
+                           else {"op": "list"}, timeout=self.timeout)
+            r.content
+            self._note_server_time(r)
         except requests.RequestException:
             pass
         for url in extra_urls:

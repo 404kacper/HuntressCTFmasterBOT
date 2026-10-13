@@ -11,6 +11,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 _HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
+# Results after which an attempt can no longer be answered.
+TERMINAL_RESULTS = frozenset({"CORRECT", "EXPIRED", "INCORRECT", "FAILED", "FAIL", "WRONG"})
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 @dataclass
@@ -104,10 +110,12 @@ class Attempt:
             return lane
         return self.challenge.split("-day-")[0]
 
-    def seconds_left(self) -> float | None:
+    def seconds_left(self, now: datetime | None = None) -> float | None:
+        """Seconds to the deadline; pass the server's time (GameMaster.server_now)
+        when you have it, because the local clock can be off by minutes."""
         if not self.deadline:
             return None
-        return (self.deadline - datetime.now(timezone.utc)).total_seconds()
+        return (self.deadline - (now or utcnow())).total_seconds()
 
     def answer_id_map(self) -> tuple[dict[str, str], list[str]]:
         """question id -> answer id (+ warnings about how it was decided)."""

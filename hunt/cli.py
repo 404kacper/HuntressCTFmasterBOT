@@ -265,7 +265,7 @@ def cmd_solve(args) -> int:
              submit=args.submit, min_confidence=args.min_confidence, partial=args.partial,
              prompt=None if args.yes else _human_prompt, trust_guessed_ids=args.trust_positional_ids)
     _print_outcome(o)
-    return 0 if o.status in ("submitted", "dry-run") else 1
+    return 0 if o.status == "dry-run" else _exit_code(o)
 
 
 def cmd_race(args) -> int:
@@ -295,6 +295,9 @@ def cmd_race(args) -> int:
             return 3
         print(f"regression: {len(rows)} archived CORRECT attempt(s) reproduce.")
     gm.warm(args.challenge, tuple(_known_artifact_hosts(archive, args.challenge)))
+    if gm.clock_offset is not None and abs(gm.clock_offset) > 5:
+        print(f"note: this machine's clock is {abs(gm.clock_offset):.0f}s {'behind' if gm.clock_offset > 0 else 'ahead of'} "
+              "the Game Master's; deadlines are judged on the server's clock")
     use_retry = True if args.retry else False if args.start else None  # None: start, or retry if finished
     print(f"asking for a timed attempt; preparing it can take a while (up to {gm.prepare_timeout:.0f}s) "
           "and does not count on the clock...", flush=True)
@@ -305,7 +308,20 @@ def cmd_race(args) -> int:
     for key in ("hall_of_fame_eligible", "unique_attempts_remaining", "ranked_attempts_remaining"):
         if o.attempt and key in o.attempt.raw:
             print(f"{key}: {o.attempt.raw[key]}")
-    return 0 if o.status == "submitted" else 1
+    return _exit_code(o)
+
+
+def _exit_code(o: Outcome) -> int:
+    if o.status != "submitted":
+        return 1
+    result = str((o.reply or {}).get("result") or "")
+    if result.upper() == "CORRECT":
+        return 0
+    if result.lower() == "accepted":
+        print(f"PARTIAL: accepted, {(o.reply or {}).get('remaining', '?')} answer(s) still outstanding")
+        return 5
+    print(f"NOT SOLVED: the Game Master answered {result or (o.reply or {}).get('error')!r}")
+    return 4
 
 
 def _known_artifact_hosts(archive: Archive, cid: str) -> list[str]:
