@@ -467,6 +467,18 @@ class AgainstFakeGameMaster(unittest.TestCase):
             self.assertEqual(cli._resolve(gm, "nothing like it"), (None, None))
         self.assertEqual(out.getvalue().count("-mastery"), 2)
 
+    def test_finished_attempt_detected_even_with_a_download_link(self):
+        from hunt.runner import _finished
+        self.assertTrue(_finished(CID, {"result": "CORRECT", "download": "?op=artifact", "questions": LIVE_QS}))
+        self.assertTrue(_finished(CID, {"result": "expired", "download": "?op=artifact"}))
+        self.assertFalse(_finished(CID, {"download": "?op=artifact", "questions": LIVE_QS}))
+
+    def test_archive_keeps_ids_with_slashes(self):
+        run = Archive(self.runs).new_run("metadata-forensics-day-01-hash-to-ride/time_trial", "regular")
+        run.write_json("start.json", {})
+        (again,) = Archive(self.runs).runs("metadata-forensics-day-01-hash-to-ride/time_trial")
+        self.assertEqual(again.challenge, "metadata-forensics-day-01-hash-to-ride/time_trial")
+
     def test_race_on_timed_by_default_route(self):
         fake, url = self._fake(seed=14, timed_by_default=True)
         code, out = self._cli(fake, url, "race", CID, "--force", "--no-prompt")
@@ -655,3 +667,35 @@ class SecondReview(unittest.TestCase):
         from hunt.gate import normalize
         q = Attempt.from_response(CID, {"questions": [dict(LIVE_QS[0], normalization="ignore_surrounding_whitespace")]}).questions[0]
         self.assertNotEqual(normalize(q, "Evidence-Note.TXT"), normalize(q, "evidence-note.txt"))
+
+
+class LiveTimeTrialShape(unittest.TestCase):
+    """Question set seen live on metadata-forensics-day-01-hash-to-ride/time_trial (2026-10-13);
+    the artifact bytes here are stand-ins with the same names."""
+
+    def test_time_trial_questions(self):
+        z = "metadata-day-01-evidence.zip"
+        hexq = lambda qid, algo, n, member: {
+            "id": qid, "question": f"Inspect `{member}`. What is its {algo} digest?", "artifact": f"{z} -> {member}",
+            "answer_format": {"kind": "pattern", "syntax": f"exact {n}-character hexadecimal {algo} digest; letter case is ignored"},
+            "normalization": "case_insensitive"}
+        qs = [{"id": "roster-filename", "question": "What is the exact filename of the roster?", "artifact": z,
+               "answer_format": {"kind": "exact_text", "syntax": "exact base filename including its extension, with no "
+                                                                 "directory path, quotes, or explanatory text"},
+               "normalization": "trim"},
+              {"id": "evidence-note-copy-size-bytes",
+               "question": "Inspect `evidence-note-copy.txt`. What is its exact size in bytes?",
+               "artifact": f"{z} -> evidence-note-copy.txt",
+               "answer_format": {"kind": "integer", "syntax": "base-10 integer with no units, separators, or explanatory text"},
+               "normalization": "trim"},
+              hexq("roster-md5", "MD5", 32, "roster.csv"),
+              hexq("evidence-note-sha1", "SHA-1", 40, "evidence-note.txt"),
+              hexq("roster-sha256", "SHA-256", 64, "roster.csv")]
+        files = [("evidence-note.txt", b"note\n"), ("evidence-note-copy.txt", b"note copy\n"),
+                 ("roster.csv", b"name,role\nana,analyst\n")]
+        _, dec = _decide(qs, files, name=z)
+        self.assertEqual(dec.held, {})
+        self.assertEqual(dec.submit["roster-filename"], "roster.csv")
+        self.assertEqual(dec.submit["evidence-note-copy-size-bytes"], "10")
+        self.assertEqual(dec.submit["roster-md5"], hashlib.md5(files[2][1]).hexdigest())
+        self.assertEqual(dec.submit["evidence-note-sha1"], hashlib.sha1(files[0][1]).hexdigest())

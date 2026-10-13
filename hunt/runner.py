@@ -130,8 +130,10 @@ def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_r
 
 
 def _finished(challenge: str, data: dict) -> bool:
+    """A reconnect to an attempt that is already solved or expired (whether or
+    not the reply still carries its download link)."""
     a = Attempt.from_response(challenge, data)
-    return not a.downloads and (a.result or "").upper() in ("CORRECT", "EXPIRED")
+    return (a.result or "").upper() in ("CORRECT", "EXPIRED") or bool(data.get("solved_by"))
 
 
 def _no_artifact_message(a: Attempt) -> str:

@@ -34,7 +34,9 @@ class Run:
 
     @property
     def challenge(self) -> str:
-        return self.path.parent.name
+        # The folder name is sanitised ('a/time_trial' -> 'a_time_trial'); the real id is in meta.json.
+        meta = self.read_json("meta.json") or {}
+        return meta.get("challenge") or self.path.parent.name
 
     def write_json(self, name: str, obj) -> None:
         # ensure_ascii: undecodable names (lone surrogates) must not crash the archive
@@ -80,7 +82,9 @@ class Archive:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         path = self.root / _safe(challenge) / f"{stamp}-{_safe(label)}"
         path.mkdir(parents=True, exist_ok=False)
-        return Run(path)
+        run = Run(path)
+        run.write_json("meta.json", {"challenge": challenge})
+        return run
 
     def runs(self, challenge: str | None = None) -> list[Run]:
         if not self.root.exists():
