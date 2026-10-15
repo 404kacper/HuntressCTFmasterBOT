@@ -1,10 +1,15 @@
 # learned-module: elf_slot_field_facts
-"""Multi-binary ELF orientation sets: questions named slotN_<field> ask for a
-field (elf_class, endianness, machine, elf_type, marker, has_symtab,
-exported_symbol, recover_code, entry_point) of the Nth binary (slot-N.elf).
+"""Multi-binary ELF orientation sets. Question ids name a field (elf_class,
+endianness, machine, elf_type, marker, has_symtab, exported_symbol,
+recover_code, entry_point) of one binary:
+  - slotN_<field>: the Nth binary (slot-N.elf) inside one evidence archive;
+  - setN.<field>: the binary inside that question's own delivery
+    (artifact "delivery N: evidence.zip"), never another delivery's;
+  - setN.slotM_<field>: binary M among those inside delivery N only.
 Each answer is parsed from that binary's own bytes. A recover_code question
-whose function is absent from the binary is answered with the literal none
-when the format allows it (also for the single-binary recover_code question)."""
+whose function is absent is answered with the literal none when the format
+allows it. A stripped binary with no non-runtime global symbol answers
+exported_symbol with none likewise."""
 import re
 import struct
 
@@ -24,6 +29,7 @@ _STD = {"main", "deregister_tm_clones", "register_tm_clones", "frame_dummy",
 _FIELDS = ("elf_class", "endianness", "machine", "elf_type", "marker",
            "has_symtab", "exported_symbol", "recover_code", "entry_point")
 _SLOT_RE = re.compile(r"^slot[_-]?(\d+)_(.+)$")
+_SET_RE = re.compile(r"^set[_-]?(\d+)[._:/-](.+)$")
 
 
 def _cstr(blob, off):
@@ -276,8 +282,7 @@ def _collect(pool):
     return out
 
 
-def _elves(q, ctx):
-    root = None
+def _under_target(q, ctx):
     try:
         root = target(q, ctx)
     except Exception:
@@ -293,7 +298,11 @@ def _elves(q, ctx):
             pool += list(ctx.artifacts.files(root))
         except Exception:
             pass
-    out = _collect(pool)
+    return root, _collect(pool)
+
+
+def _elves(q, ctx):
+    _root, out = _under_target(q, ctx)
     if not out:
         out = _collect(list(files(ctx)))
     return out
@@ -312,6 +321,21 @@ def _slot_member(elves, n):
     if 0 <= n < len(ordered):
         return ordered[n][0], ordered[n][1], 0.9
     return None, None, 0
+
+
+def _set_member(elves):
+    if len(elves) == 1:
+        return elves[0][0], elves[0][1], 0.95
+    hunt = [c for c in elves if _section(c[1], ".huntress") is not None]
+    if len(hunt) == 1:
+        return hunt[0][0], hunt[0][1], 0.9
+    if elves:
+        return elves[-1][0], elves[-1][1], 0.7
+    return None, None, 0
+
+
+def _none_ok(q):
+    return "none" in (q.syntax or "").lower() and (q.kind or "") != "integer"
 
 
 def _field(q, field, mem, elf, conf):
@@ -344,6 +368,8 @@ def _field(q, field, mem, elf, conf):
     if field == "marker":
         sec = _section(elf, ".huntress")
         if sec is None:
+            if not _none_ok(q):
+                return None
             return answer("none", f"no .huntress section in {where}", conf, subject=mem)
         if sec["type"] == 8:
             return None
@@ -357,7 +383,12 @@ def _field(q, field, mem, elf, conf):
     if field == "exported_symbol":
         name, sure = _designated(elf)
         if not name:
-            return None
+            if not _none_ok(q):
+                return None
+            has_symtab = any(s["type"] == 2 for s in elf["secs"])
+            why = "stripped (no .symtab)" if not has_symtab else "symbol tables checked"
+            return answer("none", f"{why}; no non-runtime global symbol in .dynsym/.symtab "
+                                  f"of {where}", conf, subject=mem)
         return answer(name, f"designated non-runtime global symbol in {where}",
                       conf if sure else 0.7, subject=mem)
     if field == "recover_code":
@@ -366,10 +397,10 @@ def _field(q, field, mem, elf, conf):
             v = _sym_const(elf, s)
             if v is not None:
                 return answer(str(v), f"immediate returned by recover_code in {where}",
-                              conf, subject=mem)
+                              conf, subject=mem, alternatives=[f"0x{v & 0xFFFFFFFF:x}"])
         if funcs:
             return None
-        if (q.kind or "") == "integer":
+        if (q.kind or "") == "integer" or not _none_ok(q):
             name, sure = _designated(elf)
             for s in (_named_funcs(elf, name) if name else []):
                 v = _sym_const(elf, s)
@@ -384,6 +415,28 @@ def _field(q, field, mem, elf, conf):
 @handler(priority=90, challenges=(r".*elf-orientation.*",))
 def elf_slot_field(q, ctx):
     qid = (q.id or "").lower()
+    ms = _SET_RE.match(qid)
+    if ms:
+        rest = ms.group(2)
+        _root, elves = _under_target(q, ctx)
+        if not elves:
+            print(f"elf_slot_field: no ELF under target for {qid}")
+            return None
+        sm = _SLOT_RE.match(rest)
+        if sm:
+            field = sm.group(2)
+            if field not in _FIELDS:
+                return None
+            mem, elf, conf = _slot_member(elves, int(sm.group(1)))
+        else:
+            field = rest
+            if field not in _FIELDS:
+                return None
+            mem, elf, conf = _set_member(elves)
+        if elf is None:
+            print(f"elf_slot_field: no member for {qid} among {[m.path for m, _ in elves]}")
+            return None
+        return _field(q, field, mem, elf, conf)
     mm = _SLOT_RE.match(qid)
     if not mm and qid != "recover_code":
         return None

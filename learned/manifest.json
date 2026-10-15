@@ -25,13 +25,19 @@
     },
     "elf_slot_field_facts": {
       "advisor": "cli",
-      "challenge": "binary-reverse-engineering-day-01-c-elf-orientation/time_trial",
-      "proven_on": [],
-      "replaced": null,
-      "rounds": 2,
+      "challenge": "binary-reverse-engineering-day-01-c-elf-orientation/mastery",
+      "proven": "20261015T214017Z",
+      "proven_on": [
+        "binary-reverse-engineering-day-01-c-elf-orientation/time_trial"
+      ],
+      "replaced": {
+        "file": "elf_slot_field_facts-20261015T214222Z.py",
+        "status": "candidate"
+      },
+      "rounds": 1,
       "status": "candidate",
-      "updated": "20261015T212157Z",
-      "versions": 1
+      "updated": "20261015T214222Z",
+      "versions": 4
     },
     "mobile_puzzle_answer_code": {
       "advisor": "cli",
