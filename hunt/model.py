@@ -20,9 +20,8 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def ranked_attempts_left(raw) -> int | None:
-    """ranked_attempts_remaining from a Game Master reply; None when it is missing or malformed."""
-    v = raw.get("ranked_attempts_remaining") if isinstance(raw, dict) else None
+def _count(raw, key: str) -> int | None:
+    v = raw.get(key) if isinstance(raw, dict) else None
     if isinstance(v, bool):
         return None
     if isinstance(v, int) and v >= 0:
@@ -30,6 +29,17 @@ def ranked_attempts_left(raw) -> int | None:
     if isinstance(v, str) and v.isdigit():
         return int(v)
     return None
+
+
+def ranked_attempts_left(raw) -> int | None:
+    """ranked_attempts_remaining from a Game Master reply; None when it is missing or malformed."""
+    return _count(raw, "ranked_attempts_remaining")
+
+
+def attempts_left(raw) -> int | None:
+    """unique_attempts_remaining: how many more attempts this mode will start at all (a Mastery
+    route has two). None when the reply does not say."""
+    return _count(raw, "unique_attempts_remaining")
 
 
 @dataclass

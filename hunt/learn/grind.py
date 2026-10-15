@@ -19,10 +19,13 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from ..archive import Archive, Run
+from ..forensics.artifacts import ArtifactSet
 from ..gate import DEFAULT_MIN_CONFIDENCE, decide, format_problem, normalize
 from ..gm import GameMaster, GMError
-from ..model import TERMINAL_RESULTS, ranked_attempts_left
+from ..model import TERMINAL_RESULTS, Attempt, attempts_left
 from ..runner import Outcome, play
+from ..solvers import SET_ID
+from ..solvers import solve as builtin_solve
 from . import packet
 from . import policy
 from .advisor import TRUNCATED, Advisor, AdvisorError, Conversation, extract_module
@@ -31,6 +34,10 @@ from .sandbox import Sandbox
 from .trial import failing_runs, run_trial
 
 MODE_ORDER = {"": 0, "time_trial": 1, "mastery": 2}
+# A mode with this few attempts left is only started once every layout the bot has seen of the
+# challenge comes out fully answered offline (Mastery routes allow two attempts in all).
+SCARCE_ATTEMPTS = 2
+PREFLIGHT_RUNS = 20  # newest archived runs per mode that the preflight re-solves
 
 
 @dataclass
@@ -46,6 +53,7 @@ class GrindOptions:
     submit: bool = True  # False: learn and prove, but send nothing
     one_by_one: bool = True  # submit answers singly so a refusal names the wrong one
     alternatives: int = 6  # refused answers retried with a handler's alternative spellings (untimed only)
+    preflight: bool = True  # before a new timed attempt, re-solve every archived layout offline (and learn)
 
 
 @dataclass
@@ -276,6 +284,86 @@ def use_alternatives(o: Outcome, refused: dict[str, set[str]], min_confidence: f
     return changed
 
 
+def _unanswered(dec) -> list[str]:
+    """Questions held for a reason a handler could fix (not how answer ids map)."""
+    return [qid for qid, why in dec.held.items() if not _id_hold(why)]
+
+
+def rehearsal(run: Run, cid: str, sets: int = 2) -> tuple[dict, list[tuple[str, bytes]]] | None:
+    """An archived single-download attempt rebuilt the way Mastery asks it: the same questions
+    once per set ('set1.<id>', 'set2.<id>'), one copy of the download per set. None when the run
+    is not a single-download layout."""
+    try:
+        attempt, arts = run.attempt(), run.artifact_set()
+    except Exception:
+        return None
+    if len(arts.tops) != 1 or not attempt.questions or attempt.flag_only \
+            or any(SET_ID.match(q.id) for q in attempt.questions):
+        return None
+    keep = {k: v for k, v in attempt.raw.items()
+            if k not in ("questions", "tasks", "answer_ids", "download", "downloads", "deliveries", "artifacts",
+                         "artifact_sha256", "deadline", "result", "attempt_id", "attempt")}
+    qs = [{**{k: v for k, v in q.raw.items() if k != "answer_id"}, "id": f"set{n}.{q.id}", "set": n}
+          for n in range(1, sets + 1) for q in attempt.questions]
+    top = arts.tops[0]
+    return {**keep, "questions": qs, "answer_ids": [d["id"] for d in qs]}, [(top.name, top.data)] * sets
+
+
+def first_gap(archive: Archive, cid: str, solver, opts: GrindOptions) -> tuple[Outcome, str] | None:
+    """The first layout of this challenge the current handlers cannot fully answer, offline:
+    every archived run of each of its modes (newest first), then, for Mastery, each archived
+    single-download layout rebuilt in Mastery shape. For a rehearsal the outcome has no run yet
+    (keep_rehearsal archives it, when the advisor is to be asked about it)."""
+    solver = solver or builtin_solve
+    base = packet.base_id(cid)
+    layouts: dict[tuple, Run] = {}
+    for route in (base, f"{base}/time_trial", f"{base}/mastery"):
+        runs = [r for r in archive.runs(route) if (r.path / "artifacts.json").exists()]
+        for run in reversed(runs[-PREFLIGHT_RUNS:]):
+            try:
+                attempt, arts = run.attempt(), run.artifact_set()
+            except Exception:
+                continue
+            if not attempt.questions:
+                continue
+            sol = solver(attempt, arts)
+            dec = decide(attempt, sol, opts.min_confidence, opts.trust_guessed_ids)
+            gaps = _unanswered(dec)
+            if gaps:
+                return (Outcome("dry-run", "", attempt, sol, dec, run=run),
+                        f"archived {route} attempt {run.path.name} leaves {len(gaps)} question(s) unanswered")
+            if route != f"{base}/mastery":
+                layouts.setdefault(tuple(sorted(q.id for q in attempt.questions)), run)
+    if mode(cid) != "mastery":
+        return None
+    for run in layouts.values():
+        built = rehearsal(run, cid)
+        if built is None:
+            continue
+        raw, tops = built
+        attempt = Attempt.from_response(cid, raw)
+        sol = solver(attempt, ArtifactSet(tops))
+        dec = decide(attempt, sol, opts.min_confidence, opts.trust_guessed_ids)
+        gaps = _unanswered(dec)
+        if gaps:
+            o = Outcome("dry-run", str(run.path), attempt, sol, dec, reply=raw)
+            o.downloads = tops
+            return o, (f"the {len(raw['questions']) // 2}-question layout of {run.path.parent.name}, asked the "
+                       f"Mastery way, leaves {len(gaps)} question(s) unanswered")
+    return None
+
+
+def keep_rehearsal(archive: Archive, cid: str, o: Outcome) -> Outcome:
+    """Archive a rehearsal from first_gap (in its own folder, so it is never mistaken for a real
+    attempt of the route) and return the outcome pointing at it, ready for learn()."""
+    run = archive.new_run(f"{cid}-rehearsal", "rehearsal")
+    run.write_json("meta.json", {"challenge": cid, "rehearsal_of": o.message})
+    run.write_json("start.json", o.reply)
+    run.write_artifacts([(name, data, None) for name, data in o.downloads])
+    o.run, o.attempt = run, run.attempt()
+    return o
+
+
 def _id_hold(why: str) -> bool:
     """Held because of how answer ids map to questions, which no handler can fix."""
     return why.startswith("no answer_id") or " was guessed (" in why
@@ -384,7 +472,60 @@ def grind_one(gm: GameMaster, archive: Archive, library: Library, advisor: Advis
     retry_refused = ""  # what the Game Master said when it answered a retry with 409
     last_id: str | None = None
     raw: dict = {}
+    # Time Trial / Mastery routes without run_for_time_supported: every new attempt runs a clock
+    # and spends one of a few attempts, so the bot only starts one once it is ready.
+    timed_route = bool(mode(cid)) and not entry.get("run_for_time_supported")
+    offline_episodes = 0
+
+    def preflight() -> list[str]:
+        """Offline, before a new timed attempt: learn from every layout of this challenge the
+        handlers cannot fully answer yet (no clock, no attempt spent). Returns what is still open."""
+        nonlocal convo, offline_episodes
+        while True:
+            gap = first_gap(archive, cid, box.get(), opts)
+            if gap is None:
+                return []
+            o2, what = gap
+            if advisor is None or offline_episodes >= opts.episodes:
+                return [what]
+            offline_episodes += 1
+            if o2.run is None:
+                o2 = keep_rehearsal(archive, cid, o2)
+            convo = convo or advisor.conversation(cid)
+            convo.log = log
+            log(f"  preflight: {what}; learning from it offline, before any attempt is spent")
+            log(f"  learning: {', '.join(_unanswered(o2.decision))}")
+            name = learn(convo, library, archive, o2, entry, None, opts, log)
+            if name is None:
+                return [what]
+            res.learned.append(name)
+            box.reset()
+
+    def why_not_start(reply: dict) -> str | None:
+        """Why a new timed attempt must not be started now (None: go ahead)."""
+        if not timed_route:
+            return None
+        left = attempts_left(reply)
+        if left == 0:
+            return f"no attempts left on this mode (unique_attempts_remaining: 0); `hunt status {cid}` shows it"
+        gaps = preflight() if opts.preflight else []
+        if not gaps:
+            return None
+        scarce = left <= SCARCE_ATTEMPTS if left is not None else mode(cid) == "mastery"
+        if scarce:
+            return (f"not starting a new attempt with {left if left is not None else 'an unknown number of'} "
+                    f"attempt(s) left on this mode: the bot still cannot answer {'; '.join(gaps)}. Run grind "
+                    "again with an advisor (it learns offline first), or pass --no-preflight to start anyway")
+        log(f"  preflight: {'; '.join(gaps)}; starting anyway ({left} attempts left on this mode)")
+        return None
+
     try:
+        if not Attempt.from_response(cid, st).attempt_id:
+            # Nothing started yet on this mode: the first start is a new attempt too.
+            stop = why_not_start(st)
+            if stop:
+                res.detail = stop
+                return res
         for _ in range(2 + 2 * opts.episodes + opts.fresh_variants + opts.alternatives):
             if use_retry:
                 if not untimed_retry:
@@ -393,11 +534,15 @@ def grind_one(gm: GameMaster, archive: Archive, library: Library, advisor: Advis
                                   "Check `hunt status`; --accept-timer allows it")
                     return res
                 if spent >= opts.fresh_variants and not learned_on_clock:
-                    left = ranked_attempts_left(raw)
+                    left = attempts_left(raw)
                     res.detail = (f"the attempt was lost and --fresh-variants {opts.fresh_variants} allows no "
                                   "more fresh variants (each is a new start" + (
-                                      f"; {left} ranked attempt(s) left" if left is not None else "")
+                                      f"; {left} attempt(s) left on this mode" if left is not None else "")
                                   + "); run grind again or pass a higher --fresh-variants")
+                    return res
+                stop = why_not_start(raw if attempts_left(raw) is not None else st)
+                if stop:
+                    res.detail = stop
                     return res
                 try:
                     gm.retry(cid)
@@ -444,9 +589,9 @@ def grind_one(gm: GameMaster, archive: Archive, library: Library, advisor: Advis
                 return res
             if o.attempt.timed and last_id not in announced:
                 announced.add(last_id)
-                secs, left = o.attempt.seconds_left(gm.server_now()), ranked_attempts_left(raw)
+                secs, left = o.attempt.seconds_left(gm.server_now()), attempts_left(raw)
                 log(f"  timed attempt: {max(secs or 0.0, 0.0):.0f}s left on the clock"
-                    + (f", {left} ranked attempt(s) left" if left is not None else ""))
+                    + (f", {left} more attempt(s) left on this mode" if left is not None else ""))
             if not o.attempt.timed:
                 sig = o.attempt.attempt_id or ",".join(sorted(o.attempt.expected_sha256))
                 if sig not in seeded:
