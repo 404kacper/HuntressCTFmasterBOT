@@ -142,6 +142,9 @@ class Base64Challenge:
         self.reverse_truth = reverse_truth
         self.rank_after = list(rank_after or [])  # ranks reported after each timed CORRECT
         self.sticky_incorrect = False  # status keeps saying "incorrect" on an attempt that is still open
+        # timed_start: every start/retry runs a clock, asked for or not (live Time Trial / Mastery routes)
+        self.timed_start = False
+        self.time_limit = 30.0
         self.ranked_left = 20
         self.attempt: dict | None = None
         self.history: list[dict] = []
@@ -165,9 +168,10 @@ class Base64Challenge:
         return qs
 
     def _new(self, timed: bool) -> dict:
+        timed = timed or self.timed_start
         plain = f"HuntressCTF{{{self.rng.getrandbits(64):016x}}}"
         a = {"id": secrets.token_hex(8), "plain": plain, "state": "active", "accepted": set(), "timed": timed,
-             "deadline": datetime.now(timezone.utc) + timedelta(seconds=30) if timed else None}
+             "deadline": datetime.now(timezone.utc) + timedelta(seconds=self.time_limit) if timed else None}
         if timed:
             self.ranked_left -= 1
         self.attempt = a
@@ -186,6 +190,7 @@ class Base64Challenge:
         a = self.attempt
         if a is None:
             return {"status": "not_started", "ranked_attempts_remaining": self.ranked_left}
+        self._expired(a)  # a reply after the deadline says so, like the live one
         if a["state"] == "solved":
             return {"result": "CORRECT", "solved_by": {"name": "rehearsal"}, "questions": self._questions(),
                     "ranked_attempts_remaining": self.ranked_left}

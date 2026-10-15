@@ -10,6 +10,7 @@ import json
 import os
 import random
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -305,6 +306,48 @@ class Grinding(unittest.TestCase):
         res = self._grind(adv, ids=[BASED], fresh_variants=1)
         self.assertEqual(res[BASED].status, "scored", self.log)
         self.assertEqual(len(self.based.history), 2)
+
+    def test_a_clock_that_ran_out_while_learning_does_not_use_up_fresh_variants(self):
+        # Time Trial: every start is timed, and asking the advisor outlasts the clock.
+        self.based.timed_start, self.based.time_limit = True, 1.0
+
+        def slow(message, n):
+            time.sleep(1.3)
+            return _block(GOOD)
+
+        res = self._grind(ScriptedAdvisor(slow), ids=[BASED], accept_timer=True, fresh_variants=0)
+        self.assertEqual(res[BASED].status, "scored", self.log)
+        self.assertEqual(len(self.based.history), 2)  # the lost one, then the one the new handler solved
+        self.assertTrue(all(a["timed"] for a in self.based.history))
+        self.assertTrue(any("does not count against --fresh-variants" in line for line in self.log), self.log)
+        self.assertTrue(any("timed attempt:" in line and "ranked attempt(s) left" in line for line in self.log))
+
+    def test_the_free_retry_after_learning_is_one_per_lesson(self):
+        self.based.timed_start, self.based.time_limit = True, 1.0
+        self.based.reverse_truth = True  # the module the advisor sends is wrong: nothing new is learned
+
+        def slow(message, n):
+            time.sleep(1.3)
+            return _block(GOOD)
+
+        res = self._grind(ScriptedAdvisor(slow), ids=[BASED], accept_timer=True, fresh_variants=0, episodes=1)
+        self.assertNotEqual(res[BASED].status, "scored", self.log)
+        self.assertEqual(len(self.based.history), 2, self.log)  # one lesson, one free start: never a third
+
+    def test_timed_answers_go_singly_while_the_clock_allows(self):
+        self.based.timed_start = True  # 30 s: plenty for two round trips
+        self.lib.install("base64_note", GOOD, challenge=BASED, advisor="test", rounds=1)
+        res = self._grind(None, ids=[BASED], accept_timer=True)
+        self.assertEqual(res[BASED].status, "scored", self.log)
+        self.assertEqual([len(s) for s in self.based.submissions], [1, 1])
+
+    def test_a_short_clock_sends_the_remaining_answers_together(self):
+        self.based.timed_start, self.based.time_limit = True, 1.8  # under the 3 s margin even if Date rounds up
+        self.lib.install("base64_note", GOOD, challenge=BASED, advisor="test", rounds=1)
+        res = self._grind(None, ids=[BASED], accept_timer=True)
+        self.assertEqual(res[BASED].status, "scored", self.log)
+        self.assertEqual([len(s) for s in self.based.submissions], [2])
+        self.assertTrue(any("went in one request" in line for line in self.log), self.log)
 
     def test_no_retry_on_a_route_whose_retry_may_be_timed(self):
         self.based.incorrect_ends_attempt = True  # no run_for_time_supported: retry could start a clock

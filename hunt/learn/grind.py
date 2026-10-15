@@ -14,13 +14,14 @@ handler) that was wrong, and that goes back to the advisor.
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
 from ..archive import Archive, Run
 from ..gate import DEFAULT_MIN_CONFIDENCE, decide, format_problem, normalize
 from ..gm import GameMaster, GMError
-from ..model import TERMINAL_RESULTS
+from ..model import TERMINAL_RESULTS, ranked_attempts_left
 from ..runner import Outcome, play
 from . import packet
 from . import policy
@@ -37,6 +38,8 @@ class GrindOptions:
     rounds: int = 4  # advisor replies per learning episode
     episodes: int = 3  # learning episodes per challenge
     fresh_variants: int = 1  # regular variants that may be spent after an attempt is lost
+    # (a timed attempt whose clock ran out while the bot was learning from it does not count: the
+    # retry after it is how the lesson gets used, so timed starts <= 1 + episodes + fresh_variants)
     min_confidence: float = DEFAULT_MIN_CONFIDENCE
     trust_guessed_ids: bool = False
     accept_timer: bool = False  # also start routes that do not say their start is untimed
@@ -126,13 +129,21 @@ class Verdict:
     over: bool = False  # the attempt ended (expired, failed): no answer was judged
     sent: dict[str, str] = field(default_factory=dict)
     steps: list[dict] = field(default_factory=list)
+    batched: int = 0  # answers sent together because the clock left no time to send them singly
+
+
+# Sending answers singly on a timed attempt costs one round trip each; keep this much in hand.
+_CLOCK_MARGIN = 3.0
+_RTT_SLACK = 1.5
 
 
 def submit_stepwise(gm: GameMaster, o: Outcome, library: Library, one_by_one: bool = True) -> Verdict:
     """Send the answers one at a time (answers from trusted handlers first), stopping at
     the first refusal, so a refusal names the exact answer that was wrong. The Game
     Master keeps correct partial progress ("accepted", with what remains). With
-    one_by_one=False everything goes in a single request."""
+    one_by_one=False everything goes in a single request. On a timed attempt, the
+    answers still left go in one request as soon as the deadline leaves no room for
+    one round trip each: a full answer set beats a refusal that names its culprit."""
     attempt, sol, dec = o.attempt, o.solution, o.decision
     ids = attempt.answer_id_map()[0]
     by_aid = {ids[q.id]: q.id for q in attempt.questions if q.id in ids}
@@ -142,9 +153,19 @@ def submit_stepwise(gm: GameMaster, o: Outcome, library: Library, one_by_one: bo
         return sol.answers[qid].handler if qid in sol.answers else ""
 
     items = sorted(dec.submit.items(), key=lambda kv: not library.trusted(handler_of(kv[0])))  # stable
-    groups = [{aid: value} for aid, value in items] if one_by_one else ([dict(items)] if items else [])
     v = Verdict()
-    for group in groups:
+    # A small download is about one round trip: the first estimate, until a submit measures one.
+    rtt = min(o.timings.get("download") or 1.0, 1.0)
+    while items:
+        left = attempt.seconds_left(gm.server_now()) if attempt.timed else None
+        if one_by_one and len(items) > 1 and left is not None \
+                and left < _CLOCK_MARGIN + len(items) * rtt * _RTT_SLACK:
+            v.batched = len(items)
+        if one_by_one and not v.batched:
+            group, items = dict(items[:1]), items[1:]
+        else:
+            group, items = dict(items), []
+        t = time.perf_counter()
         try:
             reply = gm.submit(attempt.challenge, group)
         except GMError as e:
@@ -152,6 +173,7 @@ def submit_stepwise(gm: GameMaster, o: Outcome, library: Library, one_by_one: bo
             v.message = f"submit failed: {e}"
             v.unknown = e.transport
             return v
+        rtt = max(rtt, time.perf_counter() - t)
         v.steps.append({"sent": group, "reply": reply})
         v.sent.update(group)
         result = str((reply or {}).get("result") or "")
@@ -170,7 +192,7 @@ def submit_stepwise(gm: GameMaster, o: Outcome, library: Library, one_by_one: bo
         else:
             v.message += " to the whole batch"
         return v
-    v.message = "every answer was accepted but the Game Master never said CORRECT" if groups else "nothing to send"
+    v.message = "every answer was accepted but the Game Master never said CORRECT" if v.steps else "nothing to send"
     return v
 
 
@@ -357,7 +379,10 @@ def grind_one(gm: GameMaster, archive: Archive, library: Library, advisor: Advis
     refused: dict[str, set[str]] = {}  # question id -> values the Game Master turned down (this attempt)
     seeded: set[str] = set()  # attempts whose earlier refusals were read from the archive
     still_open: set[str] = set()  # attempts whose retry got 409: open, whatever their result says
+    announced: set[str] = set()  # timed attempts whose clock was reported
+    learned_on_clock = False  # a module was learned from the current timed attempt
     last_id: str | None = None
+    raw: dict = {}
     try:
         for _ in range(2 + 2 * opts.episodes + opts.fresh_variants + opts.alternatives):
             if use_retry:
@@ -366,9 +391,12 @@ def grind_one(gm: GameMaster, archive: Archive, library: Library, advisor: Advis
                                   "run_for_time_supported): the bot will not start a clock for you. "
                                   "Check `hunt status`; --accept-timer allows it")
                     return res
-                if spent >= opts.fresh_variants:
+                if spent >= opts.fresh_variants and not learned_on_clock:
+                    left = ranked_attempts_left(raw)
                     res.detail = (f"the attempt was lost and --fresh-variants {opts.fresh_variants} allows no "
-                                  "more fresh variants")
+                                  "more fresh variants (each is a new start" + (
+                                      f"; {left} ranked attempt(s) left" if left is not None else "")
+                                  + "); run grind again or pass a higher --fresh-variants")
                     return res
                 try:
                     gm.retry(cid)
@@ -381,7 +409,12 @@ def grind_one(gm: GameMaster, archive: Archive, library: Library, advisor: Advis
                     if last_id:
                         still_open.add(last_id)
                 else:
-                    spent += 1
+                    if learned_on_clock:
+                        log("  (the clock ran out while the bot was learning; this variant is where the new "
+                            "handler gets used, so it does not count against --fresh-variants)")
+                    else:
+                        spent += 1
+                    learned_on_clock = False
                     refused.clear()  # a new variant: earlier refusals say nothing about its answers
                 use_retry = False
             o = play(gm, archive, cid, timed=False, use_retry=False, submit=False,
@@ -399,6 +432,11 @@ def grind_one(gm: GameMaster, archive: Archive, library: Library, advisor: Advis
             if o.status not in ("dry-run",):
                 res.status, res.detail = "error", f"{o.status}: {o.message}"
                 return res
+            if o.attempt.timed and last_id not in announced:
+                announced.add(last_id)
+                secs, left = o.attempt.seconds_left(gm.server_now()), ranked_attempts_left(raw)
+                log(f"  timed attempt: {max(secs or 0.0, 0.0):.0f}s left on the clock"
+                    + (f", {left} ranked attempt(s) left" if left is not None else ""))
             if not o.attempt.timed:
                 sig = o.attempt.attempt_id or ",".join(sorted(o.attempt.expected_sha256))
                 if sig not in seeded:
@@ -432,6 +470,8 @@ def grind_one(gm: GameMaster, archive: Archive, library: Library, advisor: Advis
                     return res
                 v = submit_stepwise(gm, o, library, opts.one_by_one)
                 _record(o.run, o, v)
+                if v.batched:
+                    log(f"  the clock was short: the last {v.batched} answers went in one request")
                 if v.correct:
                     for m in _modules_used(o):
                         library.mark_proven(m, cid)
@@ -495,6 +535,7 @@ def grind_one(gm: GameMaster, archive: Archive, library: Library, advisor: Advis
                 res.detail = "the advisor's modules never passed the offline trial"
                 return res
             res.learned.append(name)
+            learned_on_clock = learned_on_clock or o.attempt.timed
             box.reset()
         res.detail = "gave up: step limit reached"
         return res
