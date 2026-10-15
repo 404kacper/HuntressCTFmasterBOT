@@ -70,6 +70,24 @@ the clock and the ranked attempts left. A challenge spends at most 1 + `--episod
 the clock allows, so a refusal names the wrong one. When the deadline gets close, the rest go in one
 request.
 
+Timed attempts are scarce: a Mastery route allows **two in all** (`unique_attempts_remaining`).
+Before every new timed attempt, grind runs a **preflight** offline. Nothing is sent and no attempt is
+spent:
+
+1. Every archived attempt of the challenge (Single Solve, Time Trial, earlier Mastery tries) is
+   re-solved with the current handlers.
+2. Before Mastery, each Time Trial layout is also rebuilt the way Mastery asks it (`set1.<id>`,
+   `set2.<id>`, one download per set) and solved.
+
+Anything that doesn't come out fully answered goes to the advisor first, with no clock running.
+If something is still unanswered and the mode has 2 or fewer attempts left (or Mastery doesn't say),
+grind doesn't start. It stops and names what's missing. At 0 attempts left it stops without asking
+for one. `--no-preflight` skips both checks.
+
+When questions arrive as `setN.<id>`, one set per download, the solver also answers each set on its
+own: prefix removed, only that set's download in view. So the handlers learned on Time Trial answer
+Mastery too.
+
 Challenges without files work too. If the reply only names an answer id, the bot submits an
 `issued_flag` the reply hands out. Otherwise it fetches the page the prompt links, plus the scripts
 that page loads, and looks for a `flag{...}`. That fetch uses its own HTTP session, with no

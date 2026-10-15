@@ -105,7 +105,7 @@ def solve(attempt: Attempt, artifacts: ArtifactSet) -> Solution:
     return sol
 
 
-_SET_ID = re.compile(r"^set[\s#_-]*(\d+)[.:/_-](.+)$", re.I)
+SET_ID = re.compile(r"^set[\s#_-]*(\d+)[.:/_-](.+)$", re.I)
 _DELIVERY_LABEL = re.compile(r"^(?:delivery|download|bundle|package|set)[\s#_-]*(\d+)\s*(?:[:/|]\s*|$)", re.I)
 
 
@@ -115,7 +115,7 @@ def _sets(attempt: Attempt, artifacts: ArtifactSet) -> dict[int, tuple[Attempt, 
     tops = artifacts.tops
     groups: dict[int, list[tuple[str, dict]]] = {}
     for q in attempt.questions:
-        m = _SET_ID.match(q.id)
+        m = SET_ID.match(q.id)
         if not m:
             continue
         n = int(m.group(1))

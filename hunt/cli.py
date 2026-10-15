@@ -661,7 +661,7 @@ def cmd_grind(args) -> int:
     opts = GrindOptions(rounds=args.rounds, episodes=args.episodes, fresh_variants=args.fresh_variants,
                         min_confidence=args.min_confidence, trust_guessed_ids=args.trust_positional_ids,
                         accept_timer=args.accept_timer, submit=not args.no_submit, one_by_one=not args.batch,
-                        alternatives=args.alternatives)
+                        alternatives=args.alternatives, preflight=not args.no_preflight)
     results = grind(gm, Archive(args.runs), Library(args.learned), advisor, rows, opts)
     print("\n== summary")
     for r in results:
@@ -982,6 +982,9 @@ def main(argv=None) -> int:
                    help="submit all answers in one request (default: one by one, so a refusal names the wrong one)")
     p.add_argument("--alternatives", type=int, default=6,
                    help="refused answers retried with a handler's other spellings, untimed only (default 6)")
+    p.add_argument("--no-preflight", action="store_true",
+                   help="start timed attempts without first re-solving every archived layout offline "
+                        "(and without the guard that keeps the last Mastery attempts)")
     p.add_argument("--accept-timer", action="store_true",
                    help="include Time Trial / Mastery routes that do not say their start is untimed")
     p.add_argument("--min-confidence", type=float, default=DEFAULT_MIN_CONFIDENCE)

@@ -146,6 +146,7 @@ class Base64Challenge:
         self.timed_start = False
         self.time_limit = 30.0
         self.attempts_left: int | None = None  # starts allowed in all (None: unlimited); then retry says 409
+        self.report_attempts = False  # replies carry unique_attempts_remaining, like the live Mastery route
         self.ranked_left = 20
         self.attempt: dict | None = None
         self.history: list[dict] = []
@@ -188,6 +189,12 @@ class Base64Challenge:
         return base64.b64encode(self.attempt["plain"].encode()) + b"\n"
 
     def view(self) -> dict:
+        d = self._view()
+        if self.report_attempts and self.attempts_left is not None:
+            d["unique_attempts_remaining"] = max(self.attempts_left - len(self.history), 0)
+        return d
+
+    def _view(self) -> dict:
         a = self.attempt
         if a is None:
             return {"status": "not_started", "ranked_attempts_remaining": self.ranked_left}

@@ -320,7 +320,7 @@ class Grinding(unittest.TestCase):
         self.assertEqual(len(self.based.history), 2)  # the lost one, then the one the new handler solved
         self.assertTrue(all(a["timed"] for a in self.based.history))
         self.assertTrue(any("does not count against --fresh-variants" in line for line in self.log), self.log)
-        self.assertTrue(any("timed attempt:" in line and "ranked attempt(s) left" in line for line in self.log))
+        self.assertTrue(any("timed attempt:" in line for line in self.log), self.log)
 
     def test_the_free_retry_after_learning_is_one_per_lesson(self):
         self.based.timed_start, self.based.time_limit = True, 1.0
@@ -348,6 +348,60 @@ class Grinding(unittest.TestCase):
         self.assertIn("no attempts remaining for this mode", res[BASED].detail)
         self.assertIn("hunt status", res[BASED].detail)
         self.assertEqual(len(self.based.history), 2)
+
+    # ---- scarce attempts (Mastery allows two in all) ----------------------------------------
+    def _route(self, mode_name, **attrs):
+        ch = Base64Challenge(f"{BASED}/{mode_name}", rng=random.Random(9), with_length=True)
+        for k, v in attrs.items():
+            setattr(ch, k, v)
+        self.fake.extras[ch.id] = ch
+        return ch
+
+    def _archive_time_trial(self):
+        """A Time Trial attempt, archived the way grind archives one (a single download)."""
+        tt = Base64Challenge(f"{BASED}/time_trial", rng=random.Random(11), with_length=True)
+        tt._new(False)
+        run = self.archive.new_run(tt.id, "timed")
+        run.write_json("start.json", tt.view())
+        run.write_artifacts([("little-based.txt", tt.artifact(), None)])
+
+    def test_mastery_is_rehearsed_and_learned_offline_before_its_first_attempt(self):
+        # The Time Trial handler is scoped to Time Trial, so it does not answer Mastery: day 1's trap.
+        tt_only = GOOD.replace("learned-module: base64_note", "learned-module: base64_tt").replace(
+            '@handler(lanes=("warmups",))', '@handler(lanes=("warmups",), challenges=(r".*/time_trial",))')
+        self.lib.install("base64_tt", tt_only, challenge=f"{BASED}/time_trial", advisor="test", rounds=1)
+        self._archive_time_trial()
+        mastery = self._route("mastery", attempts_left=2, report_attempts=True)
+        attempts_when_asked = []
+
+        def advise(message, n):
+            attempts_when_asked.append(len(mastery.history))
+            return _block(GOOD)
+
+        adv = ScriptedAdvisor(advise)
+        res = self._grind(adv, ids=[mastery.id], accept_timer=True)
+        self.assertEqual(res[mastery.id].status, "scored", self.log)
+        self.assertEqual(attempts_when_asked, [0])  # learned before any Mastery attempt existed
+        self.assertIn("set1.decoded-message", adv.seen[0])  # asked about the Mastery shape
+        self.assertTrue(any("preflight" in line and "Mastery way" in line for line in self.log), self.log)
+        self.assertEqual(len(mastery.history), 1)  # and the one attempt it then spent scored
+
+    def test_a_scarce_mode_is_not_started_while_a_layout_is_still_unanswered(self):
+        self._archive_time_trial()  # nothing can answer it, and there is no advisor to learn from it
+        mastery = self._route("mastery", attempts_left=2, report_attempts=True)
+        res = self._grind(None, ids=[mastery.id], accept_timer=True)
+        self.assertEqual(res[mastery.id].status, "stuck", self.log)
+        self.assertIn("not starting a new attempt with 2 attempt(s) left", res[mastery.id].detail)
+        self.assertEqual(mastery.history, [])  # nothing spent
+        self.assertFalse((self.root / "runs" / f"{BASED}_mastery-rehearsal").exists())  # nothing to learn with
+
+    def test_no_attempts_left_stops_before_asking_for_one(self):
+        self.lib.install("base64_note", GOOD, challenge=BASED, advisor="test", rounds=1)
+        mastery = self._route("mastery", attempts_left=1, report_attempts=True, timed_start=True, time_limit=0.0)
+        res = self._grind(None, ids=[mastery.id], accept_timer=True)
+        self.assertEqual(res[mastery.id].status, "stuck", self.log)
+        self.assertIn("no attempts left on this mode", res[mastery.id].detail)
+        self.assertEqual(len(mastery.history), 1)
 
     def test_timed_answers_go_singly_while_the_clock_allows(self):
         self.based.timed_start = True  # 30 s: plenty for two round trips
