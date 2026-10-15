@@ -1,0 +1,27 @@
+{
+  "modules": {
+    "elf_header_section_symbol_facts": {
+      "advisor": "cli",
+      "challenge": "binary-reverse-engineering-day-01-c-elf-orientation",
+      "proven_on": [],
+      "replaced": null,
+      "rounds": 1,
+      "status": "candidate",
+      "updated": "20261015T115830Z",
+      "versions": 1
+    },
+    "mobile_puzzle_answer_code": {
+      "advisor": "cli",
+      "challenge": "mobile-android-day-01-exported-trust",
+      "proven": "20261015T120031Z",
+      "proven_on": [
+        "mobile-android-day-01-exported-trust"
+      ],
+      "replaced": null,
+      "rounds": 1,
+      "status": "proven",
+      "updated": "20261015T120028Z",
+      "versions": 1
+    }
+  }
+}
