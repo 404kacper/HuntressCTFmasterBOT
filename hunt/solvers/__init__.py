@@ -92,7 +92,7 @@ def solve(attempt: Attempt, artifacts: ArtifactSet) -> Solution:
                 notes.append(f"{reg.name} crashed on {q.id}: {e!r}")
                 continue
             if ans is not None:
-                ans.handler = ans.handler or reg.name
+                ans.handler = reg.name  # attribution comes from the registry, never from the handler
                 ctx.answers[q.id] = ans
                 # "its" in the next question may only refer to a file this one resolved.
                 ctx.subject = ans.subject

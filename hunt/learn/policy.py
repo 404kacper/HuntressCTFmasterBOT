@@ -30,7 +30,7 @@ ALLOWED_MODULES = frozenset({
 ALLOWED_HUNT = {
     "hunt.solvers": {"handler", "Answer", "Context"},
     "hunt.forensics.artifacts": {"ArtifactSet", "Member", "UnreadableMember", "norm_name", "container_kind"},
-    "hunt.forensics.identity": {"digest", "true_type", "describe", "claims_in", "DIGESTS", "TEXT_EXTS"},
+    "hunt.forensics.identity": {"digest", "true_type", "describe", "claims_in", "TEXT_EXTS"},
     "hunt.gate": {"format_problem", "normalize"},
     "hunt.model": {"Question", "Attempt"},
     "hunt.learn.kit": None,  # every public name
@@ -58,8 +58,23 @@ class PolicyError(Exception):
         self.problems = problems
 
 
+_preloaded = False
+
+
+def _preload() -> None:
+    """Import every allowed module once, so `pkg.sub.name` resolves the same way in
+    every process (submodules only appear as attributes after something imports them)."""
+    global _preloaded
+    if _preloaded:
+        return
+    for name in sorted(ALLOWED_MODULES):
+        _module(name)
+    _preloaded = True
+
+
 def check(source: str) -> list[str]:
     """Every reason this module may not run (empty list: it may)."""
+    _preload()
     if len(source) > MAX_SOURCE:
         return [f"module is {len(source)} characters; the limit is {MAX_SOURCE}"]
     try:
@@ -86,6 +101,7 @@ class _Checker(ast.NodeVisitor):
     def __init__(self):
         self.problems: list[str] = []
         self.modules: dict[str, str] = {}  # local name -> module it is bound to
+        self.imported: set[str] = set()  # every name an import statement binds
         self.module_uses: set[int] = set()  # ids of Name nodes used as `module.attr`
         self.has_handler = False
 
@@ -113,6 +129,7 @@ class _Checker(ast.NodeVisitor):
                 if a.name not in ALLOWED_MODULES:
                     self.bad(node, f"import {a.name} is not allowed (allowed: {', '.join(sorted(ALLOWED_MODULES))})")
                     continue
+                self.imported.add(a.asname or a.name.split(".")[0])
                 if a.asname:
                     self.modules[a.asname] = a.name
                 else:
@@ -125,6 +142,7 @@ class _Checker(ast.NodeVisitor):
             self.bad(node, "relative imports are not allowed")
             return
         mod = node.module or ""
+        self.imported.update(a.asname or a.name for a in node.names)
         if mod in ALLOWED_HUNT:
             allowed = ALLOWED_HUNT[mod]
             for a in node.names:
@@ -157,12 +175,21 @@ class _Checker(ast.NodeVisitor):
     def visit_Name(self, node: ast.Name) -> None:
         if node.id in BANNED_NAMES or (node.id.startswith("__") and node.id != "__name__"):
             self.bad(node, f"name {node.id!r} is not allowed")
+        elif node.id.startswith("__") and not isinstance(node.ctx, ast.Load):
+            self.bad(node, f"assigning {node.id} is not allowed")
         elif node.id in self.modules and id(node) not in self.module_uses \
                 and not isinstance(node.ctx, ast.Store):
             self.bad(node, f"module {self.modules[node.id]} may only be used as `{node.id}.something`")
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         attr = node.attr
+        if not isinstance(node.ctx, ast.Load):
+            root: ast.AST = node.value
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if isinstance(root, ast.Call) or (isinstance(root, ast.Name) and root.id in self.imported):
+                self.bad(node, f"changing .{attr} of an imported or computed object is not allowed "
+                               "(it would change it for every other handler)")
         if attr.startswith(BANNED_ATTR_PREFIXES) or attr in BANNED_ATTRS:
             self.bad(node, f"attribute .{attr} is not allowed")
         elif attr == "format" and not (isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
@@ -199,6 +226,15 @@ class _Checker(ast.NodeVisitor):
             if obj is _MISSING:
                 return base, _MISSING
         return base, obj
+
+    def visit_Subscript(self, node: ast.Subscript) -> None:
+        if not isinstance(node.ctx, ast.Load):
+            root: ast.AST = node.value
+            while isinstance(root, (ast.Attribute, ast.Subscript)):
+                root = root.value
+            if isinstance(root, ast.Name) and root.id in self.imported:
+                self.bad(node, "changing an imported object is not allowed")
+        self.generic_visit(node)
 
     def visit_Constant(self, node: ast.Constant) -> None:
         v = node.value

@@ -24,6 +24,19 @@ NAME = re.compile(r"^[a-z][a-z0-9_]{1,47}$")
 _RESERVED = {"kit", "file_identity", "manifest", "history", "rejected", "inbox", "learned"}
 
 
+def valid_name(name) -> bool:
+    """A module name that can only ever mean learned/<name>.py."""
+    return isinstance(name, str) and bool(NAME.match(name)) and name not in _RESERVED
+
+
+def module_of(handler_name: str) -> str | None:
+    """'learned/base64_note.decode' -> 'base64_note'; None for built-in or malformed names."""
+    if not isinstance(handler_name, str) or not handler_name.startswith("learned/"):
+        return None
+    module = handler_name[len("learned/"):].split(".", 1)[0]
+    return module if valid_name(module) else None
+
+
 def _stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
@@ -66,17 +79,19 @@ class Library:
         return data
 
     def entry(self, name: str) -> dict:
-        return self.manifest()["modules"].get(name, {})
+        return self.manifest()["modules"].get(name, {}) if valid_name(name) else {}
 
     def status(self, name: str) -> str:
-        return self.entry(name).get("status", "candidate") if (self.root / f"{name}.py").exists() else "missing"
+        if not valid_name(name) or not (self.root / f"{name}.py").is_file():
+            return "missing"
+        return self.entry(name).get("status", "candidate")
 
     def trusted(self, handler_name: str) -> bool:
         """Built-in handlers, and learned ones the Game Master has accepted answers from."""
-        if not handler_name.startswith("learned/"):
+        if not str(handler_name).startswith("learned/"):
             return True
-        module = handler_name[len("learned/"):].split(".", 1)[0]
-        return self.status(module) == "proven"
+        module = module_of(handler_name)
+        return module is not None and self.status(module) == "proven"
 
     # ---- writing ---------------------------------------------------------------
     def _save(self, data: dict) -> None:
@@ -86,7 +101,7 @@ class Library:
         os.replace(tmp, self.root / "manifest.json")
 
     def install(self, name: str, source: str, **meta) -> Path:
-        if not NAME.match(name) or name in _RESERVED:
+        if not valid_name(name):
             raise ValueError(f"bad module name {name!r}")
         policy.require(source)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -112,20 +127,23 @@ class Library:
         return path
 
     def mark_proven(self, name: str, challenge: str) -> None:
+        if self.status(name) == "missing":
+            return
         data = self.manifest()
         e = data["modules"].setdefault(name, {})
         e["status"] = "proven"
         if challenge not in e.setdefault("proven_on", []):
             e["proven_on"].append(challenge)
         e["proven"] = _stamp()
+        e["replaced"] = None  # this version has earned its place: never roll it back
         self._save(data)
 
     def reject(self, name: str, why: str) -> Path | None:
         """Move a module whose answer the Game Master refused out of the way. If it
         was a revision of a proven module, the proven version comes back."""
-        path = self.root / f"{name}.py"
-        if not path.exists():
+        if self.status(name) == "missing":
             return None
+        path = self.root / f"{name}.py"
         (self.root / "rejected").mkdir(exist_ok=True)
         dest = self.root / "rejected" / f"{name}-{_stamp()}.py"
         os.replace(path, dest)

@@ -60,7 +60,7 @@ def _seconds(key: str, v) -> float | None:
 
 
 def rank_in(reply, depth: int = 0) -> Standing | None:
-    """A rank (and official time) the Game Master put in a submit/status reply."""
+    """A rank and/or official time the Game Master put in a submit/status reply."""
     if depth > 3 or not isinstance(reply, dict):
         return None
     found = Standing(source="reply")
@@ -70,14 +70,14 @@ def rank_in(reply, depth: int = 0) -> Standing | None:
             found.rank = _int(v)
         elif lk in TIME_KEYS and found.seconds is None:
             found.seconds = _seconds(lk, v)
-    if found.rank is not None:
-        return found
     for k, v in reply.items():
+        if found.rank is not None:
+            break
         if str(k).lower() in ("questions", "guidance", "prompt"):
             continue
         if isinstance(v, dict) and (s := rank_in(v, depth + 1)):
-            return s
-    return None
+            found = Standing(s.rank, found.seconds if found.seconds is not None else s.seconds, "reply")
+    return found if (found.rank is not None or found.seconds is not None) else None
 
 
 def leaderboard_ops(spec) -> list[str]:
@@ -187,9 +187,12 @@ class Board:
         return self.ops
 
     def standing(self, *replies) -> Standing:
+        seconds = None
         for reply in replies:
             if (s := rank_in(reply)) is not None:
-                return s
+                if s.rank is not None:
+                    return s
+                seconds = seconds if seconds is not None else s.seconds  # a time without a place
         for op in ([self.working_op] if self.working_op else self.ops):
             try:
                 data = self.gm.get(op=op, challenge=self.challenge)
@@ -202,4 +205,4 @@ class Board:
                 return s
             if self.raw_example is None:
                 self.raw_example = data
-        return Standing(source="beat" if self.beat is not None else "none")
+        return Standing(seconds=seconds, source="beat" if self.beat is not None else "none")

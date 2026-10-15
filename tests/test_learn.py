@@ -158,8 +158,8 @@ class SandboxWorker(unittest.TestCase):
             sol = sb.solve(_attempt(), _arts())
         finally:
             sb.close()
-        self.assertEqual(sol.answers, {})
-        self.assertIn("sandbox", sol.unresolved["decoded-message"])
+        self.assertEqual(sol.answers, {})  # built-ins took over and know nothing about Base64
+        self.assertIn("sandbox unavailable", " ".join(sol.notes))
 
 
 class LibraryStore(unittest.TestCase):
@@ -295,10 +295,18 @@ class Grinding(unittest.TestCase):
 
     def test_a_lost_attempt_moves_to_a_fresh_variant(self):
         self.based.incorrect_ends_attempt = True
+        self.based.run_for_time_supported = True  # a plain retry gives an untimed variant here
         adv = ScriptedAdvisor([_block(WRONG), _block(GOOD)])
         res = self._grind(adv, ids=[BASED], fresh_variants=1)
         self.assertEqual(res[BASED].status, "scored", self.log)
         self.assertEqual(len(self.based.history), 2)
+
+    def test_no_retry_on_a_route_whose_retry_may_be_timed(self):
+        self.based.incorrect_ends_attempt = True  # no run_for_time_supported: retry could start a clock
+        res = self._grind(ScriptedAdvisor([_block(WRONG), _block(GOOD)]), ids=[BASED], fresh_variants=3)
+        self.assertEqual(res[BASED].status, "stuck")
+        self.assertIn("no untimed retry", res[BASED].detail)
+        self.assertEqual(len(self.based.history), 1)
 
     def test_an_open_attempt_that_still_says_incorrect_is_kept(self):
         self.based.sticky_incorrect = True

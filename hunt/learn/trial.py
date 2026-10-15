@@ -16,7 +16,7 @@ from ..gate import DEFAULT_MIN_CONFIDENCE, decide, normalize
 from ..model import Attempt
 from . import policy
 from .library import Library
-from .sandbox import Sandbox, SandboxError, to_solution
+from .sandbox import ROOT, TRIAL_TIMEOUT, Sandbox, SandboxError, to_solution
 
 
 @dataclass
@@ -53,16 +53,23 @@ class TrialReport:
                 f"- {r['run']}: {r['diffs']}" for r in self.regressions[:5]))
         if self.printed.strip():
             out.append("Your print() output:\n" + self.printed.strip()[-3000:])
-        return "\n\n".join(out)
+        return "\n\n".join(out).replace(ROOT, "<bot>")  # the advisor has no need for local paths
+
+
+def _strict(sandbox: Sandbox):
+    """Solve through the worker only: while judging a module, a timeout or crash must
+    count against it, not be papered over by the built-in fallback."""
+    return lambda attempt, arts: to_solution(sandbox.raw_solve(attempt, arts))
 
 
 def failing_runs(library: Library, archive: Archive, min_confidence: float = DEFAULT_MIN_CONFIDENCE,
-                 trust_guessed_ids: bool = False, latest: int = 2, timeout: float = 30.0) -> set[str]:
+                 trust_guessed_ids: bool = False, latest: int | None = None,
+                 timeout: float = TRIAL_TIMEOUT) -> set[str]:
     """Archived CORRECT runs the current library already fails to reproduce: a
     candidate is only blamed for failures it adds."""
     try:
         with Sandbox(library.modules(), timeout=timeout) as sb:
-            rows = replay(archive, None, min_confidence, trust_guessed_ids, solver=sb.solve, latest=latest)
+            rows = replay(archive, None, min_confidence, trust_guessed_ids, solver=_strict(sb), latest=latest)
     except SandboxError:
         return set()
     return {r["run"] for r in rows if not r["ok"]}
@@ -70,7 +77,7 @@ def failing_runs(library: Library, archive: Archive, min_confidence: float = DEF
 
 def run_trial(library: Library, name: str, source: str, attempt: Attempt, artifacts: ArtifactSet,
               archive: Archive | None = None, min_confidence: float = DEFAULT_MIN_CONFIDENCE,
-              trust_guessed_ids: bool = False, timeout: float = 30.0, regression_latest: int = 2,
+              trust_guessed_ids: bool = False, timeout: float = TRIAL_TIMEOUT, regression_latest: int | None = None,
               refused: dict[str, set[str]] | None = None, baseline: set[str] | None = None) -> TrialReport:
     """refused: question id -> values the Game Master already turned down on this
     attempt; a candidate that still gives one of them has not fixed anything.
@@ -92,18 +99,21 @@ def run_trial(library: Library, name: str, source: str, attempt: Attempt, artifa
         raw = sandbox.raw_solve(attempt, artifacts)
         report.answers = raw.get("answers") or {}
         mine = f"learned/{name}."
-        report.traces = [t for t in raw.get("traces") or [] if t.startswith(mine)]
-        report.other_traces = [t for t in raw.get("traces") or [] if not t.startswith(mine)]
+        # Traces naming another learned module are its problem; unattributed ones (registering
+        # handlers mid-solve, ...) can only come from the newcomer.
+        report.traces = [t for t in raw.get("traces") or [] if t.startswith(mine) or not t.startswith("learned/")]
+        report.other_traces = [t for t in raw.get("traces") or [] if t not in report.traces]
         report.printed = raw.get("printed") or ""
-        decision = decide(attempt, to_solution(raw), min_confidence, trust_guessed_ids)
-        report.held = dict(decision.held)
+        # The module is judged on its answers; how answer ids map to questions is not its business.
+        decision = decide(attempt, to_solution(raw), min_confidence, trust_guessed_ids=True)
+        report.held = {qid: why for qid, why in decision.held.items() if not why.startswith("no answer_id")}
         qs = {q.id: q for q in attempt.questions}
         for qid, values in (refused or {}).items():
             got = report.answers.get(qid, {}).get("value")
             if got is not None and normalize(qs.get(qid), got) in {normalize(qs.get(qid), x) for x in values}:
                 report.held[qid] = f"still {got!r}, which the Game Master already refused for this question"
         if archive is not None:
-            rows = replay(archive, None, min_confidence, trust_guessed_ids, solver=sandbox.solve,
+            rows = replay(archive, None, min_confidence, trust_guessed_ids, solver=_strict(sandbox),
                           latest=regression_latest)
             report.regressions = [r for r in rows if not r["ok"] and r["run"] not in (baseline or set())]
     except SandboxError as e:

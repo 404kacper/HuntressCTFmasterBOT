@@ -91,7 +91,9 @@ def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_r
     if retried and _server_says_finished(data):
         return Outcome("pending", "retry handed back the attempt that is already solved; its scoring is "
                        "probably still awaiting confirmation", attempt, timings=t)
-    if refuse and ((attempt.attempt_id and attempt.attempt_id in refuse) or attempt.expected_sha256 & refuse):
+    # A new attempt id is a new attempt, even if its artifact repeats an earlier variant;
+    # the SHA-256 comparison is only for replies that carry no id at all.
+    if refuse and ((attempt.attempt_id in refuse) if attempt.attempt_id else bool(attempt.expected_sha256 & refuse)):
         return Outcome("pending", "the Game Master handed back an attempt this session already solved",
                        attempt, timings=t)
 

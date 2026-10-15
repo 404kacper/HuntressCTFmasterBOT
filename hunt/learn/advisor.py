@@ -26,6 +26,7 @@ from pathlib import Path
 
 DEFAULT_MODEL = "claude-opus-5-5"
 DEFAULT_EFFORT = "high"
+TRUNCATED = "[reply cut off at max_tokens]"
 _SECRET_ENV = re.compile(r"HUNTRESS|GM_TOKEN|^GM$", re.I)
 
 
@@ -60,7 +61,7 @@ def my_handler(q, ctx):          # called once per question; return Answer or No
 - The gate refuses: empty values, leading/trailing whitespace, multi-line values, wrong hex length when the syntax names one, a directory path when the syntax asks for a base name, integers that are not base-10 digits.
 
 ## Sandbox rules (checked before your code runs; violations are refused)
-- Imports: only these standard modules: base64, binascii, bisect, bz2, calendar, codecs, collections, colorsys, csv, dataclasses, datetime, decimal, difflib, email (+ .header .parser .policy .utils), enum, fractions, functools, gzip, hashlib, heapq, hmac, html (+ .parser), io, ipaddress, itertools, json, lzma, math, operator, plistlib, quopri, re, statistics, string, struct, tarfile, textwrap, typing, unicodedata, urllib.parse, uuid, xml.dom.minidom, xml.etree.ElementTree (import it `as ET`), zipfile, zlib; and from the bot: hunt.solvers (handler, Answer, Context), hunt.learn.kit (anything), hunt.forensics.artifacts (ArtifactSet, Member, UnreadableMember, norm_name, container_kind), hunt.forensics.identity (digest, true_type, describe, claims_in, DIGESTS, TEXT_EXTS), hunt.gate (format_problem, normalize), hunt.model (Question, Attempt).
+- Imports: only these standard modules: base64, binascii, bisect, bz2, calendar, codecs, collections, colorsys, csv, dataclasses, datetime, decimal, difflib, email (+ .header .parser .policy .utils), enum, fractions, functools, gzip, hashlib, heapq, hmac, html (+ .parser), io, ipaddress, itertools, json, lzma, math, operator, plistlib, quopri, re, statistics, string, struct, tarfile, textwrap, typing, unicodedata, urllib.parse, uuid, xml.dom.minidom, xml.etree.ElementTree (import it `as ET`), zipfile, zlib; and from the bot: hunt.solvers (handler, Answer, Context), hunt.learn.kit (anything), hunt.forensics.artifacts (ArtifactSet, Member, UnreadableMember, norm_name, container_kind), hunt.forensics.identity (digest, true_type, describe, claims_in, TEXT_EXTS), hunt.gate (format_problem, normalize), hunt.model (Question, Attempt).
 - Not allowed: eval, exec, compile, open, input, getattr/setattr/delattr, globals/locals/vars, __import__, any attribute starting with "_", frame/code attributes, `.format()` on anything but a string literal (use f-strings), operator.attrgetter/methodcaller, string constants naming dunders, `global`, relative imports. Use a module only as `module.name`.
 - No files, network, processes or environment: the sandbox refuses them at run time too. Work only on the bytes you are handed (zipfile.ZipFile(io.BytesIO(raw)) and the like are fine).
 - print() is captured and shown back to you on the next round: use it to debug.
@@ -144,7 +145,7 @@ class Advisor:
 class ApiAdvisor(Advisor):
     name = "api"
 
-    def __init__(self, model: str | None = None, effort: str | None = None, max_tokens: int = 32000):
+    def __init__(self, model: str | None = None, effort: str | None = None, max_tokens: int = 64000):
         import anthropic  # imported here: only this backend needs the package
         self.anthropic = anthropic
         self.client = anthropic.Anthropic()  # ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / `ant` profile
@@ -187,12 +188,14 @@ class ApiAdvisor(Advisor):
             raise AdvisorError(f"Claude API error {e.status_code}: {e}") from None
         except a.APIConnectionError as e:
             raise AdvisorError(f"cannot reach the Claude API: {e}") from None
+        except (a.AnthropicError, TypeError) as e:  # no usable credentials, a broken profile, ...
+            raise AdvisorError(f"the Claude API backend is not usable: {e}") from None
         if msg.stop_reason == "refusal":
             cat = getattr(getattr(msg, "stop_details", None), "category", None)
             raise AdvisorError(f"Claude declined this packet (category: {cat or 'unspecified'})")
         text = "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", "") == "text")
         if msg.stop_reason == "max_tokens":
-            text += "\n\n[reply cut off at max_tokens]"
+            text += "\n\n" + TRUNCATED
         return text
 
 
@@ -268,6 +271,8 @@ class ManualAdvisor(Advisor):
         r = self.inbox / f"{stem}.reply.md"
         if n == 1:
             message = "SYSTEM INSTRUCTIONS (paste these first):\n\n" + SYSTEM_PROMPT + "\n\n---\n\n" + message
+        if r.exists():  # a reply from an earlier run answers an older packet
+            r.replace(r.with_name(r.name + ".old"))
         q.write_text(message, encoding="utf-8")
         self.out(f"\n>>> Give {q} to Claude, save its whole reply as {r}, then press Enter "
                  "(type 'skip' to give up on this challenge).")
@@ -302,15 +307,38 @@ class ScriptedAdvisor(Advisor):
 
 
 # ---- choosing --------------------------------------------------------------------------
+def _config_dir() -> Path:
+    """Where `ant auth login` keeps profiles: the SDK's own rule (ANTHROPIC_CONFIG_DIR,
+    else %APPDATA%\\Anthropic on Windows, else ~/.config/anthropic)."""
+    env = os.environ.get("ANTHROPIC_CONFIG_DIR")
+    if env:
+        return Path(env)
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        return (Path(appdata) if appdata else Path.home() / "AppData" / "Roaming") / "Anthropic"
+    return Path.home() / ".config" / "anthropic"
+
+
 def _api_ready() -> bool:
+    """True when the anthropic package is installed and some credential is really there:
+    a key in the environment, or a logged-in profile with its credentials file."""
     try:
         import anthropic  # noqa: F401
     except ImportError:
         return False
     if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
         return True
-    cfg = Path(os.environ.get("ANTHROPIC_CONFIG_DIR") or Path.home() / ".config" / "anthropic")
-    return cfg.is_dir()
+    cfg = _config_dir()
+    profile = os.environ.get("ANTHROPIC_PROFILE")
+    if not profile:
+        try:
+            profile = (cfg / "active_config").read_text(encoding="utf-8").strip()
+        except OSError:
+            profile = ""
+    profile = profile or "default"
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", profile) or profile in (".", ".."):
+        return False
+    return (cfg / "credentials" / f"{profile}.json").is_file()
 
 
 def pick(kind: str = "auto", model: str | None = None,
@@ -336,17 +364,46 @@ def pick(kind: str = "auto", model: str | None = None,
                   "or install Claude Code (`claude`), or run interactively for manual mode")
 
 
-_BLOCK = re.compile(r"```(?:python|py)?[ \t]*\n(.*?)```", re.S)
+_FENCE = re.compile(r"^(`{3,})[ \t]*([^\n`]*)$")
 _NAME = re.compile(r"^#\s*learned-module:\s*([A-Za-z][A-Za-z0-9_-]*)", re.M)
+_PY_TAGS = {"python", "py", "python3"}
+
+
+def _fenced_blocks(text: str) -> list[tuple[str, str]]:
+    """(info string, body) for every fenced block. A block closes at a line of at least
+    as many backticks as opened it, so blocks inside blocks and other languages pair up."""
+    blocks = []
+    lines = (text or "").split("\n")
+    i = 0
+    while i < len(lines):
+        m = _FENCE.match(lines[i].rstrip())
+        if not m:
+            i += 1
+            continue
+        ticks, info = len(m.group(1)), m.group(2).strip()
+        body = []
+        j = i + 1
+        while j < len(lines):
+            close = re.match(r"^(`{3,})[ \t]*$", lines[j].rstrip())
+            if close and len(close.group(1)) >= ticks:
+                break
+            body.append(lines[j])
+            j += 1
+        if j < len(lines):  # an unclosed fence (a cut-off reply) is not a block
+            blocks.append((info, "\n".join(body)))
+        i = j + 1
+    return blocks
 
 
 def extract_module(reply: str) -> tuple[str | None, str | None]:
-    """(module name, source) from an advisor reply; Nones when there is no code block."""
-    blocks = [b for b in _BLOCK.findall(reply or "") if b.strip()]
-    if not blocks:
+    """(module name, source) from an advisor reply; Nones when there is no complete code block."""
+    blocks = [(info, body) for info, body in _fenced_blocks(reply) if body.strip()]
+    py = [b for info, b in blocks if (info.split() or [""])[0].lower() in _PY_TAGS]
+    py = py or [b for info, b in blocks if _NAME.search(b) and not info]
+    if not py:
         return None, None
-    with_handler = [b for b in blocks if "@handler" in b]
-    src = (with_handler or blocks)[-1].strip() + "\n"
+    with_handler = [b for b in py if "@handler" in b]
+    src = (with_handler or py)[-1].strip() + "\n"
     m = _NAME.search(src)
     name = re.sub(r"[^a-z0-9_]+", "_", m.group(1).lower()).strip("_")[:47] if m else None
     if name and not name[0].isalpha():

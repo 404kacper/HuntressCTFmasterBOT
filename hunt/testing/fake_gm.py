@@ -130,12 +130,16 @@ class Base64Challenge:
 
     def __init__(self, cid: str, name: str = "A Little Based", rng: random.Random | None = None,
                  lane: str = "warmups", day: int = 1, run_for_time_supported: bool | None = None,
-                 with_length: bool = False, incorrect_ends_attempt: bool = False, rank_after: list[int] | None = None):
+                 with_length: bool = False, incorrect_ends_attempt: bool = False, rank_after: list[int] | None = None,
+                 reverse_truth: bool = False):
         self.id, self.name, self.lane, self.day = cid, name, lane, day
         self.rng = rng or random.Random(7)
         self.run_for_time_supported = run_for_time_supported
         self.with_length = with_length  # a second question: the decoded text's length
         self.incorrect_ends_attempt = incorrect_ends_attempt
+        # reverse_truth: the artifact is normal Base64, but the accepted answer is the decoded
+        # text reversed -- so a plain-decode handler is wrong here and gets refused.
+        self.reverse_truth = reverse_truth
         self.rank_after = list(rank_after or [])  # ranks reported after each timed CORRECT
         self.sticky_incorrect = False  # status keeps saying "incorrect" on an attempt that is still open
         self.ranked_left = 20
@@ -172,7 +176,8 @@ class Base64Challenge:
 
     def truth(self) -> dict[str, str]:
         p = self.attempt["plain"]
-        return {"decoded-message": p, "decoded-length": str(len(p))}
+        msg = p[::-1] if self.reverse_truth else p
+        return {"decoded-message": msg, "decoded-length": str(len(msg))}
 
     def artifact(self) -> bytes:
         return base64.b64encode(self.attempt["plain"].encode()) + b"\n"

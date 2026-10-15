@@ -76,9 +76,11 @@ def _make_gm(args) -> GameMaster:
 
 
 @contextmanager
-def _solver(args):
+def _solver(args, challenge: str | None = None, lane: str | None = None):
     """The sandbox worker loaded with learned/ (started now, before any clock), or
-    None when nothing has been learned: then built-in handlers run in process."""
+    None for built-in handlers in process: when nothing has been learned, or when
+    `challenge` is given and no learned handler applies to it (the worker decides
+    that, so learned patterns are never evaluated in this process)."""
     mods = Library(args.learned).modules()
     if not mods:
         yield None
@@ -90,10 +92,13 @@ def _solver(args):
         print(f"warning: learned handlers unavailable ({e}); using built-in handlers only")
         yield None
         return
-    for name, err in (info.get("errors") or {}).items():
-        print(f"warning: learned/{name}.py failed to load: {err.strip().splitlines()[-1]}")
     try:
-        yield sb.solve
+        for name, err in (info.get("errors") or {}).items():
+            print(f"warning: learned/{name}.py failed to load: {err.strip().splitlines()[-1]}")
+        if challenge is not None and not sb.applies(challenge, lane):
+            yield None  # nothing learned is relevant here: stay in process, fastest
+        else:
+            yield sb.solve
     finally:
         sb.close()
 
@@ -387,7 +392,7 @@ def cmd_solve(args) -> int:
                   "run_for_time_supported=true, so it may begin a real countdown. Check `hunt list`, "
                   "then pass --accept-timer if that is what you want.")
             return 3
-    with _solver(args) as solver:
+    with _solver(args, cid, (route or {}).get("lane")) as solver:
         o = play(gm, Archive(args.runs), args.challenge, timed=False, use_retry=args.retry,
                  submit=args.submit, min_confidence=args.min_confidence, partial=args.partial,
                  prompt=None if args.yes else _human_prompt, trust_guessed_ids=args.trust_positional_ids,
@@ -397,23 +402,23 @@ def cmd_solve(args) -> int:
 
 
 def cmd_race(args) -> int:
-    with _solver(args) as solver:
-        return _race(args, solver)
-
-
-def _race(args, solver) -> int:
     if args.repeat < 1 or args.gap < 0 or args.keep < 0 or args.pending_wait < 0:
         print("--repeat must be at least 1; --gap, --keep and --pending-wait cannot be negative")
         return 2
     if args.start and args.repeat > 1:
         print("--start reconnects to the same attempt every time, so it cannot be combined with --repeat")
         return 2
-    archive = Archive(args.runs)
     gm = _gm(args)
-    cid, _ = _resolve(gm, args.challenge)
+    cid, route = _resolve(gm, args.challenge)
     if cid is None:
         return 2
     args.challenge = cid
+    with _solver(args, cid, (route or {}).get("lane")) as solver:
+        return _race(args, gm, solver)
+
+
+def _race(args, gm: GameMaster, solver) -> int:
+    archive = Archive(args.runs)
     if not args.force:
         rows = replay(archive, args.challenge, args.min_confidence, args.trust_positional_ids, solver=solver)
         if not rows:
@@ -562,7 +567,7 @@ def cmd_offline(args) -> int:
         print("nothing archived for that challenge")
         return 1
     attempt, arts = run.attempt(), run.artifact_set()
-    with _solver(args) as solver:
+    with _solver(args, attempt.challenge, attempt.lane) as solver:
         sol = (solver or solve)(attempt, arts)
     dec = decide(attempt, sol, args.min_confidence, args.trust_positional_ids)
     _print_outcome(Outcome("dry-run", f"re-solved {run.path} offline", attempt, sol, dec))
@@ -689,17 +694,22 @@ def cmd_optimize(args) -> int:
     if route is not None and not route.get("run_for_time_supported"):
         print("refusing: this route does not list run_for_time_supported, so there is no opt-in timed race to optimise")
         return 2
-    with _solver(args) as solver:
+    lane = (route or {}).get("lane")
+    with _solver(args, cid, lane) as solver:
         rows = replay(archive, cid, args.min_confidence, args.trust_positional_ids, solver=solver)
-    if not rows:
+    if not rows and not args.force:
         if args.no_learn:
             print("refusing: the bot has never been CORRECT on this challenge (run `hunt grind` first)")
             return 3
         print("never CORRECT on this challenge yet: grinding it first (untimed)...")
-        from .learn.advisor import pick
+        from .learn.advisor import AdvisorError, pick
         from .learn.grind import MODE_ORDER, GrindOptions, grind, mode
         from .learn.packet import base_id
-        advisor, how = pick(args.advisor, args.model, Path(args.learned) / "inbox")
+        try:
+            advisor, how = pick(args.advisor, args.model, Path(args.learned) / "inbox")
+        except AdvisorError as e:
+            print(f"advisor: {e}")
+            return 2
         print(f"advisor: {how}")
         try:  # the modes before this one unlock it, so they come first
             chain = [r for r in gm.list() if base_id(str(r.get("id"))) == base_id(cid)
@@ -711,10 +721,17 @@ def cmd_optimize(args) -> int:
         if not res or res[-1].challenge != cid or not res[-1].points:
             print("stopping: the challenge has not scored, so racing it would only burn ranked attempts")
             return 1
-        with _solver(args) as solver:
+        with _solver(args, cid, lane) as solver:
             rows = replay(archive, cid, args.min_confidence, args.trust_positional_ids, solver=solver)
-    if not rows or not all(r["ok"] for r in rows):
-        print("refusing: archived CORRECT attempts do not reproduce (see `hunt replay`)")
+        if not rows:
+            print("refusing: the Game Master already counts this challenge as solved, but this machine has no "
+                  f"archived CORRECT attempt of it ({args.runs}/ is not shared between machines), so nothing "
+                  "proves the bot solves it. Either earn one untimed (spends a regular variant):\n"
+                  f"    py -m hunt solve {cid} --retry   then   py -m hunt solve {cid} --submit\n"
+                  "  or race trusting the learned handlers:  add --force")
+            return 3
+    if rows and not all(r["ok"] for r in rows):
+        print("refusing: archived CORRECT attempts no longer reproduce (see `hunt replay`)")
         return 3
     me = args.me
     try:
@@ -739,9 +756,10 @@ def cmd_optimize(args) -> int:
     gm.warm(cid, tuple(_known_artifact_hosts(archive, cid)))
     refuse: set[str] = set()
     times: list[float] = []
+    official: list[float] = []  # times the Game Master itself reported
     best_at = 0
     code = 1
-    with _solver(args) as solver:
+    with _solver(args, cid, lane) as solver:
         for i in range(args.max_runs):
             if left is not None and left <= args.keep:
                 print(f"stopping: {left} ranked attempt(s) left, keeping {args.keep} in reserve (--keep)")
@@ -773,10 +791,12 @@ def cmd_optimize(args) -> int:
             except GMError:
                 after = None
             standing = board.standing(o.reply, after)
-            official = f", official {standing.seconds:.3f}s" if standing.seconds is not None else ""
+            if standing.seconds is not None:
+                official.append(standing.seconds)
+            shown = f", official {standing.seconds:.3f}s" if standing.seconds is not None else ""
             place = (f"place {standing.rank}" + (f"/{standing.total}" if standing.total else "")
                      if standing.rank else "place unknown")
-            print(f"  CORRECT on-clock<= {t * 1000:.0f} ms (best {min(times) * 1000:.0f}){official}  {place} "
+            print(f"  CORRECT on-clock<= {t * 1000:.0f} ms (best {min(times) * 1000:.0f}){shown}  {place} "
                   f"[{standing.source}]  ranked left: {left if left is not None else '?'}")
             if o.attempt and o.attempt.raw.get("hall_of_fame_eligible") is False:
                 print("stopping: the Game Master says these attempts are not Hall of Fame eligible")
@@ -786,7 +806,9 @@ def cmd_optimize(args) -> int:
                 code = 0
                 break
             if args.beat is not None and standing.rank is None:
-                mine = standing.seconds if standing.seconds is not None else min(times)
+                # The official time when the Game Master gives one; else the bot's own on-clock
+                # time, which over-estimates it (a safe comparison).
+                mine = min(official) if official else min(times)
                 if mine <= args.beat:
                     print(f"done: {mine:.3f}s beats the {args.beat:.3f}s you set (--beat)")
                     code = 0
@@ -969,6 +991,8 @@ def main(argv=None) -> int:
     p.add_argument("--wait", type=float, default=180.0)
     p.add_argument("--pending-wait", type=float, default=60.0)
     p.add_argument("--no-learn", action="store_true", help="never grind first; refuse if not yet proven")
+    p.add_argument("--force", action="store_true",
+                   help="race even without an archived CORRECT attempt on this machine (e.g. on Homebase)")
     p.add_argument("--advisor", choices=("auto", "api", "cli", "manual", "none"), default="auto")
     p.add_argument("--model", help="Claude model for the advisor, if it has to learn first")
     p.add_argument("--no-prompt", action="store_true")

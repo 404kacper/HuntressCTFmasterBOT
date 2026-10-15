@@ -223,3 +223,8 @@ generality are sound. It does not show that the real server agrees.
   whose audit hook refuses network, processes and file access outside the Python installation.
   Packets fence artifact content as untrusted data, because CTF files can carry prompt injection.
   They never contain the token.
+- Nothing the worker returns is trusted by the main process: an answer is attributed to the
+  handler the bot registered, never to a name the module supplies, and the library validates every
+  module name before it touches a file, so a learned module cannot steer a filesystem operation.
+  The worker also restores the bot's own classes after each solve and drops any handler a module
+  registers mid-solve, so one learned module cannot corrupt another or the built-ins.
