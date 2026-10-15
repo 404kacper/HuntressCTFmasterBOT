@@ -1,27 +1,66 @@
 {
   "modules": {
-    "elf_header_section_symbol_facts": {
+    "elf_function_return_constant": {
       "advisor": "cli",
-      "challenge": "binary-reverse-engineering-day-01-c-elf-orientation",
+      "challenge": "binary-reverse-engineering-day-01-c-elf-orientation/time_trial",
       "proven_on": [],
       "replaced": null,
       "rounds": 1,
       "status": "candidate",
-      "updated": "20261015T115830Z",
+      "updated": "20261015T212008Z",
+      "versions": 1
+    },
+    "elf_header_section_symbol_facts": {
+      "advisor": "cli",
+      "challenge": "binary-reverse-engineering-day-01-c-elf-orientation",
+      "proven": "20261015T211607Z",
+      "proven_on": [
+        "binary-reverse-engineering-day-01-c-elf-orientation"
+      ],
+      "replaced": null,
+      "rounds": 1,
+      "status": "proven",
+      "updated": "20261015T211552Z",
+      "versions": 2
+    },
+    "elf_slot_field_facts": {
+      "advisor": "cli",
+      "challenge": "binary-reverse-engineering-day-01-c-elf-orientation/time_trial",
+      "proven_on": [],
+      "replaced": null,
+      "rounds": 2,
+      "status": "candidate",
+      "updated": "20261015T212157Z",
       "versions": 1
     },
     "mobile_puzzle_answer_code": {
       "advisor": "cli",
       "challenge": "mobile-android-day-01-exported-trust",
-      "proven": "20261015T203348Z",
+      "proven": "20261015T212217Z",
       "proven_on": [
         "mobile-android-day-01-exported-trust",
-        "mobile-android-day-01-exported-trust/time_trial"
+        "mobile-android-day-01-exported-trust/time_trial",
+        "mobile-android-day-01-exported-trust/mastery"
       ],
       "replaced": null,
       "rounds": 1,
       "status": "proven",
       "updated": "20261015T120028Z",
+      "versions": 1
+    },
+    "powershell_fixture_indicators": {
+      "advisor": "cli",
+      "challenge": "script-analysis-day-01-native-signals",
+      "proven": "20261015T212307Z",
+      "proven_on": [
+        "script-analysis-day-01-native-signals",
+        "script-analysis-day-01-native-signals/time_trial",
+        "script-analysis-day-01-native-signals/mastery"
+      ],
+      "replaced": null,
+      "rounds": 1,
+      "status": "proven",
+      "updated": "20261015T211747Z",
       "versions": 1
     }
   }

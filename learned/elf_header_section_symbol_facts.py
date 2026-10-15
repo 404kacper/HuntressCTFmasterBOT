@@ -14,6 +14,9 @@ _MACHINES = {
     62: "x86-64", 183: "AArch64", 243: "RISC-V", 258: "LoongArch",
 }
 _TYPES = {0: "NONE", 1: "REL", 2: "EXEC", 3: "DYN", 4: "CORE"}
+_TYPE_DESC = {0: "None", 1: "Relocatable file", 2: "Executable file",
+              3: "Shared object file", 4: "Core file"}
+_TYPE_WORD = {0: "none", 1: "relocatable", 2: "executable", 3: "shared", 4: "core"}
 
 _STD_SYMS = {
     "main", "deregister_tm_clones", "register_tm_clones", "frame_dummy",
@@ -47,7 +50,16 @@ def _parse(raw):
     except struct.error:
         return None
     elf = {"class": cls, "endian": e, "type": etype, "machine": mach,
-           "entry": entry, "sections": [], "symbols": [], "raw": raw}
+           "entry": entry, "sections": [], "symbols": [], "raw": raw,
+           "ptypes": []}
+    ptypes = []
+    if phoff and phn and phes:
+        for i in range(phn):
+            try:
+                ptypes.append(struct.unpack_from(e + "I", raw, phoff + i * phes)[0])
+            except struct.error:
+                break
+    elf["ptypes"] = ptypes
     secs = []
     if shoff and shn and shes:
         for i in range(shn):
@@ -280,6 +292,28 @@ def _designated_symbol(elf):
     return None, ""
 
 
+def _type_spellings(elf):
+    t = elf["type"]
+    short = _TYPES.get(t)
+    if short is None:
+        return [str(t), f"0x{t:x}"]
+    desc = _TYPE_DESC[t]
+    out = []
+    if t == 3:
+        pie = 3 in elf["ptypes"]  # PT_INTERP present -> PIE executable
+        pie_desc = "Position-Independent Executable file"
+        first, second = (pie_desc, desc) if pie else (desc, pie_desc)
+        out += [f"DYN ({first})", f"DYN ({second})", f"ET_{short}", first, second]
+    else:
+        out += [f"{short} ({desc})", f"ET_{short}", desc]
+    out += [_TYPE_WORD[t], short]
+    seen = []
+    for v in out:
+        if v not in seen:
+            seen.append(v)
+    return seen
+
+
 _SEC_RE = re.compile(r"(\.[A-Za-z0-9_.\-]+)\s+section")
 _FN_RE = re.compile(r"return(?:ed)?\s+by\s+`?([A-Za-z_][A-Za-z0-9_]*)")
 
@@ -298,6 +332,14 @@ def elf_facts(q, ctx):
     conf = 0.95 if ncand == 1 else 0.8
     where = mem.path
 
+    if qid == "elf_type" or asks(q, "object", "type"):
+        refused = q.raw.get("refused_by_game_master") or [] if isinstance(q.raw, dict) else []
+        opts = [v for v in _type_spellings(elf) if v not in refused]
+        if not opts:
+            return None
+        return answer(opts[0], f"e_type={elf['type']} in {where} (readelf spelling)", conf,
+                      subject=mem, alternatives=opts[1:])
+
     if qid == "elf_class" or ("class" in hay and "elf" in hay):
         v = "ELF64" if elf["class"] == 2 else "ELF32"
         return answer(v, f"e_ident[EI_CLASS]={elf['class']} in {where}", conf, subject=mem)
@@ -312,10 +354,6 @@ def elf_facts(q, ctx):
     if qid == "machine" or "machine" in hay or "architecture" in hay:
         v = _MACHINES.get(elf["machine"], f"EM_{elf['machine']}")
         return answer(v, f"e_machine={elf['machine']} in {where}", conf, subject=mem)
-
-    if qid == "elf_type" or asks(q, "object", "type"):
-        v = _TYPES.get(elf["type"], str(elf["type"]))
-        return answer(v, f"e_type={elf['type']} in {where}", conf, subject=mem)
 
     if qid == "has_symtab" or ("symtab" in hay and ("true" in hay or "retain" in hay)):
         has = any(s["type"] == 2 or s["name"] == ".symtab" for s in elf["sections"])
