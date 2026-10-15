@@ -77,6 +77,14 @@ def wants(q: Question, *words: str) -> bool:
     return all(w.lower() in hay for w in words)
 
 
-def answer(value, evidence: str, confidence: float = 0.95, subject: Member | None = None) -> Answer:
-    """An answer as the gate expects it: a string, with the reason it is right."""
-    return Answer(str(value).strip(), confidence, evidence, subject=subject)
+def answer(value, evidence: str, confidence: float = 0.95, subject: Member | None = None,
+           alternatives=()) -> Answer:
+    """An answer as the gate expects it: a string, with the reason it is right. `alternatives`
+    are other spellings of the same fact, best first, for when the Game Master refuses `value`."""
+    main = str(value).strip()
+    alts = []
+    for a in alternatives or ():
+        a = str(a).strip()
+        if a and a != main and a not in alts:
+            alts.append(a)
+    return Answer(main, confidence, evidence, subject=subject, alternatives=alts)

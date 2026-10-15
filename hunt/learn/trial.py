@@ -45,7 +45,8 @@ class TrialReport:
             rows = []
             for qid in sorted(set(self.answers) | set(self.held)):
                 a = self.answers.get(qid)
-                got = (f"{a['value']!r} (confidence {a['confidence']:.2f}, by {a['handler']})" if a else "no answer")
+                got = (f"{a['value']!r} (confidence {a['confidence']:.2f}, by {a['handler']})"
+                       + (f", alternatives {a['alternatives']!r}" if a.get("alternatives") else "") if a else "no answer")
                 rows.append(f"- {qid}: {got}" + (f"\n    HELD: {self.held[qid]}" if qid in self.held else ""))
             out.append("Result on the current attempt:\n" + "\n".join(rows))
         if self.regressions:
@@ -109,9 +110,16 @@ def run_trial(library: Library, name: str, source: str, attempt: Attempt, artifa
         report.held = {qid: why for qid, why in decision.held.items() if not why.startswith("no answer_id")}
         qs = {q.id: q for q in attempt.questions}
         for qid, values in (refused or {}).items():
-            got = report.answers.get(qid, {}).get("value")
-            if got is not None and normalize(qs.get(qid), got) in {normalize(qs.get(qid), x) for x in values}:
-                report.held[qid] = f"still {got!r}, which the Game Master already refused for this question"
+            a = report.answers.get(qid) or {}
+            got = a.get("value")
+            if got is None:
+                continue
+            no = {normalize(qs.get(qid), x) for x in values}
+            options = [got] + [x for x in a.get("alternatives") or [] if isinstance(x, str)]
+            if all(normalize(qs.get(qid), x) in no for x in options):
+                report.held[qid] = (f"still {got!r}, which the Game Master already refused for this question "
+                                    f"(refused so far: {sorted(values)!r}); give a different value or "
+                                    "alternatives=[...] it has not refused")
         if archive is not None:
             rows = replay(archive, None, min_confidence, trust_guessed_ids, solver=_strict(sandbox),
                           latest=regression_latest)

@@ -27,6 +27,9 @@ class Answer:
     evidence: str
     handler: str = ""
     subject: Member | None = field(default=None, repr=False)
+    # Other spellings of the same fact, best first ("EXEC (Executable file)", "ET_EXEC"). An untimed
+    # attempt tries them in order when the Game Master refuses the value; a timed one never does.
+    alternatives: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -59,9 +62,15 @@ class _Reg:
     def applies(self, a: Attempt) -> bool:
         if self.challenges and not any(re.fullmatch(c, a.challenge) for c in self.challenges):
             return False
-        if self.lanes and a.lane not in self.lanes:
+        if self.lanes and not any(lane_matches(lane, a.lane) for lane in self.lanes):
             return False
         return True
+
+
+def lane_matches(wanted: str, lane: str) -> bool:
+    """'binary' also scopes 'binary-reverse-engineering': lane ids are hyphenated phrases, and a
+    handler written against the short name must not silently stop applying."""
+    return lane == wanted or lane.startswith(wanted + "-")
 
 
 _HANDLERS: list[_Reg] = []

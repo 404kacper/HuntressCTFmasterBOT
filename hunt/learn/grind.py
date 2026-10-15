@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from ..archive import Archive, Run
-from ..gate import DEFAULT_MIN_CONFIDENCE
+from ..gate import DEFAULT_MIN_CONFIDENCE, decide, format_problem, normalize
 from ..gm import GameMaster, GMError
 from ..model import TERMINAL_RESULTS
 from ..runner import Outcome, play
@@ -42,6 +42,7 @@ class GrindOptions:
     accept_timer: bool = False  # also start routes that do not say their start is untimed
     submit: bool = True  # False: learn and prove, but send nothing
     one_by_one: bool = True  # submit answers singly so a refusal names the wrong one
+    alternatives: int = 6  # refused answers retried with a handler's alternative spellings (untimed only)
 
 
 @dataclass
@@ -188,6 +189,71 @@ def _modules_used(o: Outcome) -> set[str]:
     return {m for a in o.solution.answers.values() if (m := module_of(a.handler))}
 
 
+def archived_refusals(archive: Archive, attempt) -> dict[str, set[str]]:
+    """question id -> values the Game Master refused on this same attempt (same attempt id, or for
+    a static Single Solve artifact the same bytes) in earlier runs, so a new run does not send
+    them again."""
+    out: dict[str, set[str]] = {}
+    for run in archive.runs(attempt.challenge):
+        sub = run.read_json("submit.json") or {}
+        steps = sub.get("steps") or []
+        if not steps:
+            continue
+        try:
+            a = run.attempt()
+        except Exception:
+            continue
+        same_id = bool(attempt.attempt_id) and a.attempt_id == attempt.attempt_id
+        same_bytes = bool(attempt.expected_sha256) and a.expected_sha256 == attempt.expected_sha256
+        if not (same_id or same_bytes):
+            continue
+        by_aid = {aid: qid for qid, aid in a.answer_id_map()[0].items()}
+        for st in steps:
+            sent, reply = st.get("sent") or {}, st.get("reply") or {}
+            if len(sent) == 1 and str(reply.get("result") or "").lower() in ("incorrect", "wrong"):
+                aid, value = next(iter(sent.items()))
+                out.setdefault(by_aid.get(aid, aid), set()).add(str(value))
+    return out
+
+
+def untried(ans, q, refused: set[str]) -> list[str]:
+    """The answer's value and alternatives that the Game Master has not refused, best first."""
+    seen = {normalize(q, x) for x in refused}
+    out = []
+    for v in [ans.value] + list(ans.alternatives or []):
+        n = normalize(q, v)
+        if n not in seen and v not in out and format_problem(q, v) is None:
+            out.append(v)
+    return out
+
+
+def use_alternatives(o: Outcome, refused: dict[str, set[str]], min_confidence: float,
+                     trust_guessed_ids: bool) -> list[str]:
+    """Swap every refused answer for its handler's next alternative and re-gate; an answer with
+    nothing left to try is held, so it is never sent again. Returns what was swapped."""
+    changed = []
+    stale = {}
+    qs = {q.id: q for q in o.attempt.questions}
+    for qid, values in refused.items():
+        ans = o.solution.answers.get(qid) if o.solution else None
+        if ans is None or qid not in qs:
+            continue
+        options = untried(ans, qs[qid], values)
+        if not options:
+            stale[qid] = f"the Game Master already refused {ans.value!r} (and every alternative) for this question"
+        elif options[0] != ans.value:
+            changed.append(f"{qid}: {ans.value!r} -> {options[0]!r}")
+            ans.evidence = f"{ans.evidence} [alternative: {ans.value!r} was refused]"
+            ans.value = options[0]
+    if changed or stale:
+        o.decision = decide(o.attempt, o.solution, min_confidence, trust_guessed_ids)
+        ids = o.attempt.answer_id_map()[0]
+        for qid, why in stale.items():
+            o.decision.submit.pop(ids.get(qid, qid), None)
+            o.decision.held[qid] = why
+    return changed
+
+
 def _id_hold(why: str) -> bool:
     """Held because of how answer ids map to questions, which no handler can fix."""
     return why.startswith("no answer_id") or " was guessed (" in why
@@ -201,23 +267,30 @@ def learn(convo: Conversation, library: Library, archive: Archive, o: Outcome, e
     arts = o.run.artifact_set() if o.run else None
     if arts is None:
         return None
-    message = packet.build(o.attempt, arts, o.solution, o.decision, library, archive, entry)
+    message = packet.build(o.attempt, arts, o.solution, o.decision, library, archive, entry, refused=refused)
     if feedback:
         message = f"## What happened last time\n{feedback}\n\n" + message
     baseline = failing_runs(library, archive, opts.min_confidence, opts.trust_guessed_ids)
+    transcript = _Transcript(o.run.path / "advisor")
     for rnd in range(1, opts.rounds + 1):
         log(f"    asking the advisor (round {rnd}/{opts.rounds})...")
+        transcript.write("ask", message)
         try:
             reply = convo.ask(message)
         except AdvisorError as e:
+            transcript.write("error", str(e))
             log(f"    advisor: {e}")
             return None
+        transcript.write(f"reply-{convo.served_by or convo.advisor.name}", reply)
         name, source = extract_module(reply)
         if source is None:
+            gist = " ".join(reply.split())[:160] or "(empty reply)"
             if TRUNCATED in reply:
+                log("    the reply was cut off at the output limit before the module was complete")
                 message = ("Your reply was cut off at the output limit before the module was complete. Send a "
                            "more compact complete module in one ```python block.")
             else:
+                log(f"    the reply had no ```python block: {gist}")
                 message = ("Your reply had no ```python block. Reply with the complete module in one fenced "
                            "```python block whose first line is `# learned-module: <name>`.")
             continue
@@ -225,6 +298,7 @@ def learn(convo: Conversation, library: Library, archive: Archive, o: Outcome, e
             name = re.sub(r"[^a-z0-9_]+", "_", f"learned_{packet.base_id(o.attempt.challenge)}".lower())[:47]
         report = run_trial(library, name, source, o.attempt, arts, archive, opts.min_confidence,
                            opts.trust_guessed_ids, refused=refused, baseline=baseline)
+        transcript.write("trial", report.feedback())
         if report.ok:
             try:
                 library.install(name, source, challenge=o.attempt.challenge, advisor=convo.advisor.name, rounds=rnd)
@@ -238,6 +312,27 @@ def learn(convo: Conversation, library: Library, archive: Archive, o: Outcome, e
         log(f"    {name}: not yet ({str(first).splitlines()[0][:160]})")
         message = report.feedback() + "\n\nSend the complete corrected module."
     return None
+
+
+class _Transcript:
+    """Every packet, reply and trial verdict of a learning episode, next to the run it is about,
+    so a failed episode can be read afterwards (runs/<challenge>/<run>/advisor/)."""
+
+    def __init__(self, path):
+        n = 1
+        while path.with_name(f"{path.name}-{n}" if n > 1 else path.name).exists():
+            n += 1
+        self.path = path.with_name(f"{path.name}-{n}" if n > 1 else path.name)
+        self.n = 0
+
+    def write(self, kind: str, text: str) -> None:
+        self.n += 1
+        try:
+            self.path.mkdir(exist_ok=True)
+            safe = re.sub(r"[^A-Za-z0-9._-]+", "_", kind)[:40]
+            (self.path / f"{self.n:02d}-{safe}.md").write_text(text, encoding="utf-8")
+        except OSError:
+            pass  # a transcript must never stop the learning
 
 
 def grind_one(gm: GameMaster, archive: Archive, library: Library, advisor: Advisor | None, entry: dict,
@@ -260,10 +355,11 @@ def grind_one(gm: GameMaster, archive: Archive, library: Library, advisor: Advis
     use_retry = False
     spent = episodes = 0
     refused: dict[str, set[str]] = {}  # question id -> values the Game Master turned down (this attempt)
+    seeded: set[str] = set()  # attempts whose earlier refusals were read from the archive
     still_open: set[str] = set()  # attempts whose retry got 409: open, whatever their result says
     last_id: str | None = None
     try:
-        for _ in range(2 + 2 * opts.episodes + opts.fresh_variants):
+        for _ in range(2 + 2 * opts.episodes + opts.fresh_variants + opts.alternatives):
             if use_retry:
                 if not untimed_retry:
                     res.detail = ("the attempt is over and this route has no untimed retry (no "
@@ -303,6 +399,14 @@ def grind_one(gm: GameMaster, archive: Archive, library: Library, advisor: Advis
             if o.status not in ("dry-run",):
                 res.status, res.detail = "error", f"{o.status}: {o.message}"
                 return res
+            if not o.attempt.timed:
+                sig = o.attempt.attempt_id or ",".join(sorted(o.attempt.expected_sha256))
+                if sig not in seeded:
+                    seeded.add(sig)
+                    for qid, values in archived_refusals(archive, o.attempt).items():
+                        refused.setdefault(qid, set()).update(values)
+                for change in use_alternatives(o, refused, opts.min_confidence, opts.trust_guessed_ids):
+                    log(f"  trying an alternative answer: {change}")
             if o.attempt.timed and not opts.accept_timer:
                 # A clock is running (an old timed attempt, or a route that is timed after all).
                 # Finish it at once if every answer is ready; never learn or retry on the clock.
@@ -347,19 +451,24 @@ def grind_one(gm: GameMaster, archive: Archive, library: Library, advisor: Advis
                 qid, value, handler = v.culprit
                 refused.setdefault(qid, set()).add(value)
                 q = next((x for x in o.attempt.questions if x.id == qid), None)
+                log(f"  refused: {qid} = {value!r} (from {handler})")
+                ans = o.solution.answers.get(qid) if o.solution else None
+                if q is not None and ans is not None and not o.attempt.timed and untried(ans, q, refused[qid]):
+                    continue  # the next pass sends the handler's next alternative; no advisor needed yet
+                module = module_of(handler)
                 feedback = (f"The Game Master refused the answer {value!r} to question `{qid}`"
                             + (f" ({q.text})" if q else "") + f", which came from handler `{handler}`. "
-                            "Every answer sent before it was accepted. Work out what that handler got wrong.")
-                log(f"  refused: {qid} = {value!r} (from {handler})")
-                module = module_of(handler)
+                            f"Every value it has refused for `{qid}` so far: {sorted(refused[qid])!r}. Every "
+                            "answer sent before it was accepted. Work out what that handler got wrong. If the fact "
+                            "is right and only its spelling is in doubt, return the best spelling as the value "
+                            "and the other plausible spellings as alternatives=[...], best first."
+                            + (f" Revise learned/{module}.py by sending the whole module under the same name "
+                               f"`{module}`." if module and module in library.names() else ""))
                 if module and module in library.names():
-                    if library.status(module) == "proven":
-                        # It earned its place elsewhere; keep it. The refused value is recorded, so the
-                        # advisor has to write a challenge-specific override that answers differently.
-                        log(f"  learned/{module}.py is proven on other challenges: kept, asking for an override")
-                    else:
-                        library.reject(module, f"{cid}: {qid}={value!r} refused")
-                        box.reset()
+                    # Kept either way: one refused field is no reason to throw away the answers it got
+                    # right. The refused value is recorded, so the trial only passes a revision that
+                    # answers differently.
+                    log(f"  learned/{module}.py kept; asking the advisor to revise it")
                 continue  # look again: the attempt may still be open, or may need a fresh variant
             # Something is held (or a refused answer needs a better handler): learn.
             if feedback is None and o.decision.held and all(_id_hold(w) for w in o.decision.held.values()):
@@ -368,7 +477,7 @@ def grind_one(gm: GameMaster, archive: Archive, library: Library, advisor: Advis
                               f"`hunt inspect {cid}`; --trust-positional-ids sends them by position")
                 return res
             if advisor is None:
-                where = _save_packet(o, library, archive, entry)
+                where = _save_packet(o, library, archive, entry, refused)
                 res.detail = (f"{len(o.decision.held)} question(s) need a new handler and there is no advisor; "
                               f"packet saved to {where}")
                 return res
@@ -377,6 +486,7 @@ def grind_one(gm: GameMaster, archive: Archive, library: Library, advisor: Advis
                 return res
             episodes += 1
             convo = convo or advisor.conversation(cid)
+            convo.log = log
             held = ", ".join(o.decision.held) or "(answers to revise)"
             log(f"  learning: {held}")
             name = learn(convo, library, archive, o, entry, feedback, opts, log, refused)
@@ -394,8 +504,10 @@ def grind_one(gm: GameMaster, archive: Archive, library: Library, advisor: Advis
             convo.close()
 
 
-def _save_packet(o: Outcome, library: Library, archive: Archive, entry: dict | None) -> str:
-    text = packet.build(o.attempt, o.run.artifact_set(), o.solution, o.decision, library, archive, entry)
+def _save_packet(o: Outcome, library: Library, archive: Archive, entry: dict | None,
+                 refused: dict[str, set[str]] | None = None) -> str:
+    text = packet.build(o.attempt, o.run.artifact_set(), o.solution, o.decision, library, archive, entry,
+                        refused=refused)
     path = o.run.path / "packet.md"
     path.write_text(text, encoding="utf-8")
     return str(path)

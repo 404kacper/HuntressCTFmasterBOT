@@ -11,7 +11,7 @@ import binascii
 import json
 import re
 
-from hunt.learn.kit import answer, files, data, text
+from hunt.learn.kit import answer, files, data, target, text
 from hunt.solvers import handler
 
 
@@ -55,9 +55,14 @@ def _decode(value, codec):
 @handler(lanes=("mobile-android",))
 def puzzle_answer(q, ctx):
     pat = _pattern_from_format(q)
+    # Mastery hands out one APK per set: answer each question from its own delivery only.
+    root = target(q, ctx)
+    if root is None and len(ctx.artifacts.tops) > 1:
+        return None
+    members = files(ctx, root)
 
     # 1) Prefer a puzzle/fixture JSON that explicitly carries the answer.
-    for m in files(ctx):
+    for m in members:
         name = (m.basename or "").lower()
         if not name.endswith(".json"):
             continue
@@ -82,7 +87,7 @@ def puzzle_answer(q, ctx):
                     return answer(v, f"'{key}' field (codec={codec or 'plain'}) of {m.path}", 0.96, subject=m)
 
     # 2) Fall back: scan every member's bytes/strings for a matching token.
-    for m in files(ctx):
+    for m in members:
         raw = data(m)
         if not raw:
             continue

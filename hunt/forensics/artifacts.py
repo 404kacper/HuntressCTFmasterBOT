@@ -23,6 +23,8 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
+from . import winzip_aes
+
 MAX_DEPTH = 4
 MAX_TOTAL_BYTES = 512 * 1024 * 1024
 ZIP_PASSWORDS = (b"infected", b"malware", b"virus")
@@ -158,7 +160,8 @@ class ArtifactSet:
     def _expand_zip(self, m: Member) -> list[Member]:
         out: list[Member] = []
         try:
-            zf = zipfile.ZipFile(io.BytesIO(m.data))
+            archive = m.data
+            zf = zipfile.ZipFile(io.BytesIO(archive))
             infos = zf.infolist()
         except Exception as e:  # BadZipFile, odd name encodings, ...
             m.notes.append(f"bad zip: {type(e).__name__}: {e}")
@@ -171,7 +174,7 @@ class ArtifactSet:
                 continue
             kid = Member(name, m.chain + (name,), i, m.depth + 1,
                          loader=self._budgeted(info.file_size,
-                                               lambda notes, info=info: _read_zip_member(zf, info, notes)),
+                                               lambda notes, info=info: _read_zip_member(zf, info, notes, archive)),
                          mtime=_zip_time(info.date_time), stored_crc=info.CRC, name_is_guess=guess)
             if note:
                 kid.notes.append(note)
@@ -360,8 +363,11 @@ def _unix_time(ts) -> datetime | None:
         return None
 
 
-def _read_zip_member(zf: zipfile.ZipFile, info: zipfile.ZipInfo, notes: list[str]) -> bytes | None:
+def _read_zip_member(zf: zipfile.ZipFile, info: zipfile.ZipInfo, notes: list[str],
+                     archive: bytes | None = None) -> bytes | None:
     encrypted = bool(info.flag_bits & 0x1)
+    if info.compress_type == winzip_aes.AES_METHOD and archive is not None:
+        return _read_aes_member(archive, info, notes)
     for pwd in ((None,) + ZIP_PASSWORDS) if encrypted else (None,):
         try:
             data = zf.read(info, pwd=pwd)
@@ -385,4 +391,17 @@ def _read_zip_member(zf: zipfile.ZipFile, info: zipfile.ZipInfo, notes: list[str
             notes.append(f"decrypted with password {pwd.decode()!r}")
         return data
     notes.append("encrypted; no known password produced valid data")
+    return None
+
+
+def _read_aes_member(archive: bytes, info: zipfile.ZipInfo, notes: list[str]) -> bytes | None:
+    """WinZip AES (method 99): zipfile raises NotImplementedError on these whatever the password."""
+    for pwd in ZIP_PASSWORDS:
+        try:
+            data = winzip_aes.decrypt_member(archive, info, pwd)
+        except winzip_aes.WrongPassword:
+            continue
+        notes.append(f"decrypted (WinZip AES) with password {pwd.decode()!r}")
+        return data
+    notes.append("WinZip AES encrypted; no known password produced valid data")
     return None

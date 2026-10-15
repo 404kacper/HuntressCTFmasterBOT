@@ -56,8 +56,19 @@ then Time Trial, then Mastery. All attempts are untimed, so no clock and no rank
 py -m hunt grind --day 2                 # every challenge of day 2, all modes
 py -m hunt grind "A Little Based"        # one challenge, all of its modes
 py -m hunt grind --day 2 --no-submit     # learn and prove offline, send nothing
+py -m hunt grind --day 1 --accept-timer  # also Time Trial / Mastery routes that may start a clock
 py -m hunt learned                       # what the bot has learned so far
 ```
+
+Most day-1 Time Trial and Mastery routes don't list `run_for_time_supported`, so grind skips them
+unless you pass `--accept-timer`. Each such start can spend one ranked attempt on a 30-second clock.
+Grind never asks the advisor while a clock is running.
+
+Challenges without files work too. If the reply only names an answer id, the bot submits an
+`issued_flag` the reply hands out. Otherwise it fetches the page the prompt links, plus the scripts
+that page loads, and looks for a `flag{...}`. That fetch uses its own HTTP session, with no
+Authorization header, and never contacts the Game Master's host. Zips encrypted with WinZip AES are
+opened like ZipCrypto ones, using `infected`, `malware` or `virus`.
 
 For each challenge, grind starts (or reconnects to) an untimed attempt and solves it with
 everything the bot knows. If every answer passes the gate, it submits. If some question has no
@@ -77,8 +88,12 @@ handler, it **asks Claude to write one** and goes back and forth with it:
    a fixed module, and this repeats for up to `--rounds` replies.
 4. Once it passes, the module is saved in `learned/` and the attempt is submitted **one answer at
    a time**, answers from proven handlers first. The Game Master keeps correct partial progress,
-   so if it refuses an answer, the bot knows exactly which handler was wrong. That handler is
-   rejected, and the refusal goes back to Claude.
+   so if it refuses an answer, the bot knows exactly which handler was wrong. A handler can give
+   `alternatives=[...]`, other spellings of the same fact such as `EXEC` or `ET_EXEC`. On an
+   untimed attempt the bot tries those first. Refused values are kept in the run archive and are
+   never sent again for the same attempt. If nothing is left to try, the module is **kept**, and
+   the refusal goes back to Claude with a request to revise that module under the same name. One
+   wrong field is no reason to throw away the answers the module got right.
 5. On CORRECT, the module is marked *proven*. Every later variant, timed race and day reuses it
    with no AI in the loop.
 
@@ -86,10 +101,22 @@ Who plays Claude (`--advisor`, default `auto` picks the first that works):
 
 | advisor | needs | notes |
 |---|---|---|
-| `api` | `py -m pip install anthropic` plus `ANTHROPIC_API_KEY` (or `ant auth login`) | model `claude-opus-5-5` (`--model` / `HUNT_CLAUDE_MODEL`), refusal fallback on |
-| `cli` | Claude Code installed (`claude`) | runs `claude -p` with **all tools off**: it can only read the packet and reply |
+| `api` | `py -m pip install anthropic` plus `ANTHROPIC_API_KEY` (or `ant auth login`) | model `claude-opus-5-5` (`--model` / `HUNT_CLAUDE_MODEL`); server-side fallback to `claude-opus-4-8` when it declines |
+| `cli` | Claude Code installed (`claude`) | runs `claude -p` with **all tools off**: it can only read the packet and reply. If Opus 5.5 declines, the same packet goes to `claude-opus-4-8` |
+| `kimi` | `MOONSHOT_API_KEY` | Kimi alone (`HUNT_KIMI_MODEL`, default `kimi-k3`; `HUNT_KIMI_BASE_URL`, default `https://api.moonshot.ai/v1`) |
 | `manual` | you | writes `learned/inbox/<challenge>-roundN.md`; you paste it into Claude and save the reply next to it |
 | `none` | - | known questions only; for the rest, a `packet.md` is saved in the run folder |
+
+**Escalation on refusal.** Opus 5.5 handles the packet first, then Opus 4.8 if 5.5 declines.
+Change that list with `--fallback-models`, or pass `none` to turn it off. If both Claude models
+decline and `MOONSHOT_API_KEY` is set, the conversation moves to Kimi and stays there. `--kimi on`
+requires Kimi, and `--kimi off` never uses it. A network error or a module that fails the trial
+never escalates. Only a refusal does. Kimi receives the same packet Claude would: challenge text,
+questions and artifact previews. It never receives the Game Master token. The packet goes to
+Moonshot's servers, so decide whether that's acceptable for your event data.
+
+Every learning episode leaves a transcript in the run folder (`runs/<challenge>/<run>/advisor/`).
+It holds each packet, each reply (named after the model that wrote it) and each trial verdict.
 
 Run grind **on your PC**, not on Homebase: an API key is a credential, and Huntress asks you not to
 put credentials into Homebase. Then commit `learned/` (`git add learned; git commit`) and

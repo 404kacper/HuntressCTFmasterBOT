@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 _HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
 # Results after which an attempt can no longer be answered.
 TERMINAL_RESULTS = frozenset({"CORRECT", "EXPIRED", "INCORRECT", "FAILED", "FAIL", "WRONG"})
+SYNTHESIZED = "_synthesized"  # marks a question the bot made from answer_ids (see _flag_questions)
 
 
 def utcnow() -> datetime:
@@ -76,7 +77,7 @@ class Attempt:
 
     @classmethod
     def from_response(cls, challenge: str, data: dict) -> "Attempt":
-        qdicts = list(_iter_question_dicts(data))
+        qdicts = list(_iter_question_dicts(data)) or _flag_questions(data)
         questions = [Question.from_dict(q, i) for i, q in enumerate(qdicts)]
         raw_ids = _answer_ids(data)
         scalar = all(isinstance(a, (str, int)) and not isinstance(a, bool) for a in raw_ids)
@@ -99,6 +100,12 @@ class Attempt:
     @property
     def timed(self) -> bool:
         return self.deadline is not None
+
+    @property
+    def flag_only(self) -> bool:
+        """No questions and no files: the reply only names answer ids (orientation challenges whose
+        answer is a flag the reply hands out, or one hidden on a page the prompt links to)."""
+        return bool(self.questions) and all(q.raw.get(SYNTHESIZED) for q in self.questions)
 
     @property
     def result(self) -> str | None:
@@ -171,6 +178,19 @@ def _iter_question_dicts(data: dict):
             yield from (q for q in task.get("questions") or [] if isinstance(q, dict))
 
 
+def _flag_questions(data: dict) -> list[dict]:
+    """One question per answer id for a reply that has answer ids but neither questions nor
+    files; its text is the challenge prompt. Marked SYNTHESIZED: the Game Master never sent it."""
+    ids = data.get("answer_ids")
+    if not isinstance(ids, list) or not ids or not all(isinstance(a, str) and a for a in ids):
+        return []
+    if _download_entries(data) or data.get("tasks"):
+        return []
+    prompt = str(data.get("prompt") or data.get("name") or "")
+    return [{"id": a, "answer_id": a, "question": prompt, "answer_format": {"kind": "flag"}, SYNTHESIZED: True}
+            for a in ids]
+
+
 def _answer_ids(data: dict) -> list:
     ids = data.get("answer_ids")
     if isinstance(ids, list):
@@ -209,20 +229,27 @@ def _download_entries(data: dict) -> list[tuple[str, str | None]]:
     index. A list of downloads wins over a legacy single 'download' field."""
     listed: list[tuple[str, str | None]] = []
 
-    def take(v):
+    def take(v, into):
         if isinstance(v, str) and v:
-            listed.append((v, None))
+            into.append((v, None))
         elif isinstance(v, dict):
             link = next((v[k] for k in _LINK_KEYS if isinstance(v.get(k), str) and v[k]), "")
             sha = _entry_sha(v)
             if link or sha or v.get("filename") or v.get("name"):
-                listed.append((link, sha))
+                into.append((link, sha))
         elif isinstance(v, list):
             for x in v:
-                take(x)
+                take(x, into)
 
     for key in ("downloads", "deliveries", "artifacts"):
-        take(data.get(key))
+        group: list[tuple[str, str | None]] = []
+        take(data.get(key), group)
+        if listed and _same_deliveries(listed, group):
+            # Mastery replies list the same files twice: 'downloads' (links) and 'artifacts'
+            # (links + SHA-256). That is one delivery each, not twice as many.
+            listed = [(a or b, sa or sb) for (a, sa), (b, sb) in zip(listed, group)]
+        else:
+            listed += group
     for task in data.get("tasks") or []:
         if isinstance(task, dict) and task.get("download"):
             listed.append((str(task["download"]), _entry_sha(task)))
@@ -238,6 +265,21 @@ def _download_entries(data: dict) -> list[tuple[str, str | None]]:
         if entry not in out:
             out.append(entry)
     return out
+
+
+def _same_deliveries(a: list[tuple[str, str | None]], b: list[tuple[str, str | None]]) -> bool:
+    """Two listings describing the same deliveries in the same order: every pair names the same
+    link (or one side has none) and never disagrees on a SHA-256."""
+    if len(a) != len(b):
+        return False
+    for (la, sa), (lb, sb) in zip(a, b):
+        if la and lb and la != lb:
+            return False
+        if sa and sb and sa != sb:
+            return False
+        if not ((la and lb) or (sa and sb)):
+            return False  # nothing ties the two entries together
+    return True
 
 
 def _collect_downloads(data: dict) -> list[str]:

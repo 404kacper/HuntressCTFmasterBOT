@@ -49,6 +49,7 @@ _DENIED_BUILTINS = ("open", "eval", "exec", "compile", "input", "breakpoint", "g
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 MAX_PRINTED = 4000
 MAX_VALUE = 10_000
+MAX_ALTERNATIVES = 8
 
 
 class _Hook:
@@ -187,7 +188,8 @@ def _load(name: str, source: str, traces: list[str]):
 
 
 def _snapshot(q, ctx) -> tuple:
-    answers = {k: (a, a.value, a.confidence, a.evidence, a.handler, a.subject) for k, a in ctx.answers.items()}
+    answers = {k: (a, a.value, a.confidence, a.evidence, a.handler, a.subject, tuple(a.alternatives))
+               for k, a in ctx.answers.items()}
     question = (q.id, q.text, q.artifact, q.kind, q.syntax, q.normalization, q.answer_id)
     return answers, question, (ctx.subject, ctx.subject_confidence)
 
@@ -196,12 +198,14 @@ def _restore(q, ctx, snap: tuple) -> bool:
     """Undo whatever a handler changed outside its own answer; True if it changed anything."""
     answers, question, subject = snap
     changed = False
-    now = {k: (a, a.value, a.confidence, a.evidence, a.handler, a.subject) for k, a in ctx.answers.items()}
+    now = {k: (a, a.value, a.confidence, a.evidence, a.handler, a.subject, tuple(a.alternatives))
+           for k, a in ctx.answers.items()}
     if now != answers:
         changed = True
         ctx.answers.clear()
-        for k, (a, value, conf, ev, handler, subj) in answers.items():
+        for k, (a, value, conf, ev, handler, subj, alts) in answers.items():
             a.value, a.confidence, a.evidence, a.handler, a.subject = value, conf, ev, handler, subj
+            a.alternatives = list(alts)
             ctx.answers[k] = a
     if (q.id, q.text, q.artifact, q.kind, q.syntax, q.normalization, q.answer_id) != question:
         changed = True
@@ -260,8 +264,10 @@ def _solve(req: dict, blobs: list[bytes], traces: list[str], printed: io.StringI
             conf = float(a.confidence)
         except (TypeError, ValueError):
             conf = 0.0
+        alts = a.alternatives if isinstance(a.alternatives, (list, tuple)) else []
         answers[str(qid)[:200]] = {"value": str(a.value)[:MAX_VALUE], "confidence": conf,
-                                   "evidence": _clean(a.evidence, 2000), "handler": _clean(a.handler, 200)}
+                                   "evidence": _clean(a.evidence, 2000), "handler": _clean(a.handler, 200),
+                                   "alternatives": [str(x)[:MAX_VALUE] for x in alts[:MAX_ALTERNATIVES]]}
     return {"answers": answers, "unresolved": {str(k)[:200]: _clean(v, 500) for k, v in sol.unresolved.items()},
             "notes": [_clean(n, 500) for n in sol.notes[:50]], "traces": traces[:20],
             "printed": printed.getvalue()[:MAX_PRINTED], "seconds": time.perf_counter() - t}

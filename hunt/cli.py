@@ -635,8 +635,16 @@ def _pick_entries(rows: list[dict], wanted: list[str]) -> tuple[list[dict], list
     return picked, missing
 
 
+def _pick_advisor(args):
+    from .learn.advisor import pick
+    fallbacks = None
+    if args.fallback_models is not None:
+        fallbacks = [m.strip() for m in args.fallback_models.split(",") if m.strip() and m.strip() != "none"]
+    return pick(args.advisor, args.model, Path(args.learned) / "inbox", fallback_models=fallbacks, kimi=args.kimi)
+
+
 def cmd_grind(args) -> int:
-    from .learn.advisor import AdvisorError, pick
+    from .learn.advisor import AdvisorError
     from .learn.grind import GrindOptions, grind
 
     if args.rounds < 1 or args.episodes < 0 or args.fresh_variants < 0:
@@ -654,16 +662,17 @@ def cmd_grind(args) -> int:
         print("no challenges to grind")
         return 1
     try:
-        advisor, how = pick(args.advisor, args.model, Path(args.learned) / "inbox")
+        advisor, how = _pick_advisor(args)
     except AdvisorError as e:
         print(f"advisor: {e}")
         return 2
     print(f"advisor: {how}")
     if advisor is not None:
-        print("  (questions and artifact previews go to Claude; the Game Master token never does)")
+        print("  (questions and artifact previews go to the advisor; the Game Master token never does)")
     opts = GrindOptions(rounds=args.rounds, episodes=args.episodes, fresh_variants=args.fresh_variants,
                         min_confidence=args.min_confidence, trust_guessed_ids=args.trust_positional_ids,
-                        accept_timer=args.accept_timer, submit=not args.no_submit, one_by_one=not args.batch)
+                        accept_timer=args.accept_timer, submit=not args.no_submit, one_by_one=not args.batch,
+                        alternatives=args.alternatives)
     results = grind(gm, Archive(args.runs), Library(args.learned), advisor, rows, opts)
     print("\n== summary")
     for r in results:
@@ -702,11 +711,11 @@ def cmd_optimize(args) -> int:
             print("refusing: the bot has never been CORRECT on this challenge (run `hunt grind` first)")
             return 3
         print("never CORRECT on this challenge yet: grinding it first (untimed)...")
-        from .learn.advisor import AdvisorError, pick
+        from .learn.advisor import AdvisorError
         from .learn.grind import MODE_ORDER, GrindOptions, grind, mode
         from .learn.packet import base_id
         try:
-            advisor, how = pick(args.advisor, args.model, Path(args.learned) / "inbox")
+            advisor, how = _pick_advisor(args)
         except AdvisorError as e:
             print(f"advisor: {e}")
             return 2
@@ -907,6 +916,17 @@ def main(argv=None) -> int:
         p.add_argument("--trust-positional-ids", action="store_true",
                        help="send answers even when answer_ids had to be matched to questions by position")
 
+    def advisor_opts(p):
+        p.add_argument("--advisor", choices=("auto", "api", "cli", "kimi", "manual", "none"), default="auto",
+                       help="who writes new handlers (default auto: API key, else `claude` CLI, else manual)")
+        p.add_argument("--model", help="Claude model for the advisor (default claude-opus-5-5 or $HUNT_CLAUDE_MODEL)")
+        p.add_argument("--fallback-models", metavar="M1,M2",
+                       help="Claude models asked, in order, when the first declines a packet "
+                            "(default claude-opus-4-8; 'none' for no fallback)")
+        p.add_argument("--kimi", choices=("auto", "on", "off"), default="auto",
+                       help="Kimi as the last resort when every Claude model declined (auto: when "
+                            "MOONSHOT_API_KEY is set; model $HUNT_KIMI_MODEL, default kimi-k3)")
+
     p = sub.add_parser("solve", help="untimed attempt; dry run unless --submit")
     p.add_argument("challenge")
     p.add_argument("--submit", action="store_true")
@@ -963,9 +983,7 @@ def main(argv=None) -> int:
     p.add_argument("challenges", nargs="*", help="ids or names (default: everything `list` returns)")
     p.add_argument("--day", type=int)
     p.add_argument("--lane")
-    p.add_argument("--advisor", choices=("auto", "api", "cli", "manual", "none"), default="auto",
-                   help="who writes new handlers (default auto: API key, else `claude` CLI, else manual)")
-    p.add_argument("--model", help="Claude model for the advisor (default claude-opus-5-5 or $HUNT_CLAUDE_MODEL)")
+    advisor_opts(p)
     p.add_argument("--rounds", type=int, default=4, help="advisor replies per learning episode (default 4)")
     p.add_argument("--episodes", type=int, default=3, help="learning episodes per challenge (default 3)")
     p.add_argument("--fresh-variants", type=int, default=1,
@@ -973,6 +991,8 @@ def main(argv=None) -> int:
     p.add_argument("--no-submit", action="store_true", help="learn and prove offline, send nothing")
     p.add_argument("--batch", action="store_true",
                    help="submit all answers in one request (default: one by one, so a refusal names the wrong one)")
+    p.add_argument("--alternatives", type=int, default=6,
+                   help="refused answers retried with a handler's other spellings, untimed only (default 6)")
     p.add_argument("--accept-timer", action="store_true",
                    help="include Time Trial / Mastery routes that do not say their start is untimed")
     p.add_argument("--min-confidence", type=float, default=DEFAULT_MIN_CONFIDENCE)
@@ -993,8 +1013,7 @@ def main(argv=None) -> int:
     p.add_argument("--no-learn", action="store_true", help="never grind first; refuse if not yet proven")
     p.add_argument("--force", action="store_true",
                    help="race even without an archived CORRECT attempt on this machine (e.g. on Homebase)")
-    p.add_argument("--advisor", choices=("auto", "api", "cli", "manual", "none"), default="auto")
-    p.add_argument("--model", help="Claude model for the advisor, if it has to learn first")
+    advisor_opts(p)
     p.add_argument("--no-prompt", action="store_true")
     gate_opts(p)
     p.set_defaults(fn=cmd_optimize)

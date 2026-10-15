@@ -130,7 +130,8 @@ class Policy(unittest.TestCase):
 
 class SandboxWorker(unittest.TestCase):
     def test_no_secrets_in_the_worker_environment(self):
-        with mock.patch.dict(os.environ, {"HUNTRESS_GM_TOKEN": "secret", "ANTHROPIC_API_KEY": "k", "SYSTEMROOT": "C:\\w"}):
+        with mock.patch.dict(os.environ, {"HUNTRESS_GM_TOKEN": "secret", "ANTHROPIC_API_KEY": "k", "SYSTEMROOT": "C:\\w"},
+                             clear=True):  # clear: a real Windows environment also has WINDIR
             env = clean_env()
         self.assertEqual(env, {"SYSTEMROOT": "C:\\w"})
 
@@ -291,7 +292,11 @@ class Grinding(unittest.TestCase):
         # answers went in one at a time: the length (right) was accepted before the message (wrong)
         first = self.based.submissions[:2]
         self.assertEqual([len(s) for s in first], [1, 1])
-        self.assertTrue(list((self.root / "learned" / "rejected").iterdir()))
+        # the module is kept for revision (the answers it got right are not thrown away) ...
+        self.assertFalse((self.root / "learned" / "rejected").exists())
+        self.assertTrue(any("kept; asking the advisor to revise it" in line for line in self.log), self.log)
+        # ... and the advisor is told to send the revision under the same name
+        self.assertIn("Revise learned/base64_note.py", adv.seen[1])
 
     def test_a_lost_attempt_moves_to_a_fresh_variant(self):
         self.based.incorrect_ends_attempt = True
@@ -433,11 +438,12 @@ class ApiBackend(unittest.TestCase):
         convo.ask("feedback two")
         kw = calls[-1]
         self.assertEqual(kw["model"], "claude-opus-5-5")
-        self.assertEqual(kw["betas"], ["server-side-fallback-2026-07-01"])
-        self.assertEqual(kw["extra_body"]["fallbacks"], "default")
+        # Opus 5.5 first; the API itself re-runs a declined request on Opus 4.8
+        self.assertEqual(kw["betas"], ["server-side-fallback-2026-06-01"])
+        self.assertEqual(kw["extra_body"]["fallbacks"], [{"model": "claude-opus-4-8"}])
         self.assertEqual(kw["system"][0]["cache_control"], {"type": "ephemeral"})
         self.assertEqual([m["role"] for m in kw["messages"]], ["user", "assistant", "user"])
-        self.assertNotIn("thinking", kw)
+        self.assertEqual(kw["thinking"], {"type": "adaptive"})  # Opus 4.8 thinks only when asked to
 
 
 if __name__ == "__main__":

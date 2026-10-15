@@ -13,9 +13,10 @@
     "mobile_puzzle_answer_code": {
       "advisor": "cli",
       "challenge": "mobile-android-day-01-exported-trust",
-      "proven": "20261015T120031Z",
+      "proven": "20261015T203348Z",
       "proven_on": [
-        "mobile-android-day-01-exported-trust"
+        "mobile-android-day-01-exported-trust",
+        "mobile-android-day-01-exported-trust/time_trial"
       ],
       "replaced": null,
       "rounds": 1,

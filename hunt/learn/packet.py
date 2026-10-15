@@ -36,9 +36,10 @@ def base_id(cid: str) -> str:
 
 
 def build(attempt: Attempt, arts: ArtifactSet, solution: Solution, decision: Decision,
-          library: Library | None = None, archive: Archive | None = None, entry: dict | None = None) -> str:
-    parts = [_header(attempt, entry), _questions(attempt, solution, decision), _inventory(arts, attempt),
-             _previews(arts, attempt)]
+          library: Library | None = None, archive: Archive | None = None, entry: dict | None = None,
+          refused: dict[str, set[str]] | None = None) -> str:
+    parts = [_header(attempt, entry), _questions(attempt, solution, decision, refused or {}),
+             _inventory(arts, attempt), _previews(arts, attempt)]
     if archive is not None:
         ex = _examples(archive, attempt.challenge)
         if ex:
@@ -72,10 +73,12 @@ def _header(attempt: Attempt, entry: dict | None) -> str:
     return out
 
 
-def _questions(attempt: Attempt, solution: Solution, decision: Decision) -> str:
+def _questions(attempt: Attempt, solution: Solution, decision: Decision, refused: dict[str, set[str]]) -> str:
     rows = []
     for q in attempt.questions:
         d = {k: v for k, v in q.raw.items() if k not in ("answer_id",)}
+        if refused.get(q.id):
+            d["refused_by_game_master"] = sorted(refused[q.id])
         a = solution.answers.get(q.id)
         if q.id in decision.held:
             d["bot_status"] = f"HELD: {decision.held[q.id]}"
@@ -84,6 +87,8 @@ def _questions(attempt: Attempt, solution: Solution, decision: Decision) -> str:
         elif a:
             d["bot_status"] = f"answered by {a.handler} (confidence {a.confidence:.2f}): {a.evidence}"
             d["bot_answer"] = a.value
+        if a and a.alternatives:
+            d["bot_alternatives"] = list(a.alternatives)
         rows.append(d)
     return ("## Questions (as the Game Master sent them, plus what the bot did)\n"
             + fence(json.dumps(rows, ensure_ascii=False, indent=1, default=str)))

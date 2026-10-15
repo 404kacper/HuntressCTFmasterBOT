@@ -12,6 +12,7 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Callable
 
+from . import web
 from .archive import Archive, Run
 from .forensics.artifacts import ArtifactSet
 from .forensics.identity import inventory
@@ -97,7 +98,8 @@ def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_r
         return Outcome("pending", "the Game Master handed back an attempt this session already solved",
                        attempt, timings=t)
 
-    if not attempt.downloads and (attempt.result or not attempt.questions):
+    flag_only = attempt.flag_only and not _server_says_finished(data)
+    if not attempt.downloads and not flag_only and (attempt.result or not attempt.questions):
         run = _archive(archive, attempt, data, [], None, None, None, None)
         return Outcome("no-artifact", _no_artifact_message(attempt), attempt, run=run, timings=t)
     if timed and not attempt.timed:
@@ -108,13 +110,17 @@ def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_r
 
     try:
         t1 = clock()
-        downloads = gm.artifacts(challenge, attempt.downloads)
+        if flag_only:
+            # Nothing to download from the Game Master; a page the prompt links may hold the answer.
+            downloads = web.fetch_targets(str(data.get("prompt") or ""), {gm.host.lower()})
+        else:
+            downloads = gm.artifacts(challenge, attempt.downloads)
         t["download"] = clock() - t1
     except GMError as e:
         run = _archive(archive, attempt, data, getattr(e, "partial", []), None, None, None, None)
         return Outcome("gm-error", str(e), attempt, run=run, timings=t)
 
-    problem, downloads = _verify_downloads(attempt, downloads)
+    problem, downloads = (None, downloads) if flag_only else _verify_downloads(attempt, downloads)
     if problem:
         run = _archive(archive, attempt, data, downloads, None, None, None, None)
         return Outcome("wrong-artifact", problem, attempt, run=run, timings=t)

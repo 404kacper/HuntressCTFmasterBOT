@@ -53,7 +53,8 @@ _CONTENT_OBJECT = re.compile(
     r"\b(?:analyst|host ?name|host|user ?name|user|author|owner|field|line|string|payload|sequence|marker|"
     r"chunk|section|embedded|original|password|url|domain|address|e-?mail|endpoint|signature|certificate|"
     r"process|command|variable|function|token|key|word|number|offset|portion|substring|version info|"
-    r"entry point)s?\b|\b(?:first|last)\s+\d+\s+bytes?\b", re.I)
+    r"entry point|indicator|ioc|wallet|mutex|user-agent)s?\b|\b(?:first|last)\s+\d+\s+bytes?\b|"
+    r"\b(?:embedded|written|referenced|mentioned|dropped|named)\s+(?:in|by|inside)\b", re.I)
 _ORDINALS = {"first": 0, "1st": 0, "second": 1, "2nd": 1, "third": 2, "3rd": 2,
              "fourth": 3, "4th": 3, "fifth": 4, "5th": 4, "last": -1, "final": -1}
 _ORDINAL_RX = re.compile(r"\b(" + "|".join(_ORDINALS) + r")\s+((?:[a-z0-9]+[\s_-]?){1,3})", re.I)

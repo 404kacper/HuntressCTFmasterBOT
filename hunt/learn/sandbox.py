@@ -200,7 +200,9 @@ class Sandbox:
 
 def to_solution(r: dict) -> Solution:
     answers = {qid: Answer(str(a.get("value", "")), float(a.get("confidence") or 0.0), str(a.get("evidence", "")),
-                           str(a.get("handler", ""))[:200])
+                           str(a.get("handler", ""))[:200],
+                           alternatives=[str(x) for x in (a.get("alternatives") or [])[:8]
+                                         if isinstance(a.get("alternatives"), list)])
                for qid, a in (r.get("answers") or {}).items() if isinstance(a, dict)}
     notes = list(r.get("notes") or []) + [str(t).splitlines()[0] for t in r.get("traces") or [] if str(t)]
     return Solution(answers, dict(r.get("unresolved") or {}), notes)
