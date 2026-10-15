@@ -20,6 +20,18 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def ranked_attempts_left(raw) -> int | None:
+    """ranked_attempts_remaining from a Game Master reply; None when it is missing or malformed."""
+    v = raw.get("ranked_attempts_remaining") if isinstance(raw, dict) else None
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int) and v >= 0:
+        return v
+    if isinstance(v, str) and v.isdigit():
+        return int(v)
+    return None
+
+
 @dataclass
 class Question:
     id: str

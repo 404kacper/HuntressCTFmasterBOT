@@ -45,7 +45,7 @@ from .gate import DEFAULT_MIN_CONFIDENCE, decide
 from .gm import GameMaster, GMError
 from .learn.library import Library
 from .learn.sandbox import Sandbox, SandboxError
-from .model import Attempt
+from .model import Attempt, ranked_attempts_left
 from .runner import Outcome, play
 from .solvers import solve
 
@@ -445,7 +445,7 @@ def _race(args, gm: GameMaster, solver) -> int:
     use_retry = True if args.retry else False if args.start else None  # None: start, or retry if finished
     if args.repeat > 1:
         try:
-            left = _ranked_left(gm.status(args.challenge))
+            left = ranked_attempts_left(gm.status(args.challenge))
         except GMError:
             left = None
         if left is None:
@@ -487,7 +487,7 @@ def _race(args, gm: GameMaster, solver) -> int:
                 if o.attempt and key in o.attempt.raw:
                     print(f"{key}: {o.attempt.raw[key]}")
             break
-        left = _ranked_left(o.attempt.raw if o.attempt else {})
+        left = ranked_attempts_left(o.attempt.raw if o.attempt else {})
         print(f"  CORRECT  on-clock<= {best[-1] * 1000:.0f} ms  (download {t.get('download', 0) * 1000:.0f}, "
               f"solve {t.get('solve', 0) * 1000:.1f}, submit {t.get('submit', 0) * 1000:.0f} ms)  "
               f"ranked attempts left: {left if left is not None else '?'}   archived: {o.run.path if o.run else '-'}")
@@ -528,17 +528,6 @@ def _play_through_pending(gm: GameMaster, archive: Archive, args, use_retry, ref
         time.sleep(delay)
         waited += delay
         delay = min(delay * 2, 16.0)
-
-
-def _ranked_left(raw) -> int | None:
-    v = raw.get("ranked_attempts_remaining") if isinstance(raw, dict) else None
-    if isinstance(v, bool):
-        return None
-    if isinstance(v, int) and v >= 0:
-        return v
-    if isinstance(v, str) and v.isdigit():
-        return int(v)
-    return None
 
 
 def _exit_code(o: Outcome) -> int:
@@ -758,7 +747,7 @@ def cmd_optimize(args) -> int:
     if not ops and args.beat is None:
         print("note: the Game Master lists no leaderboard operation; unless its replies carry a rank, give the "
               "time of the place you want with --beat SECONDS (read it off the Hall of Fame)")
-    left = _ranked_left(st)
+    left = ranked_attempts_left(st)
     if left is None:
         print("refusing: cannot read ranked_attempts_remaining, so the reserve (--keep) cannot be protected")
         return 2
@@ -794,7 +783,7 @@ def cmd_optimize(args) -> int:
             times.append(t)
             if t <= min(times):
                 best_at = len(times)
-            left = _ranked_left(o.attempt.raw if o.attempt else {})
+            left = ranked_attempts_left(o.attempt.raw if o.attempt else {})
             try:
                 after = gm.status(cid) if board.working_op is None else None
             except GMError:

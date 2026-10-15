@@ -62,7 +62,13 @@ py -m hunt learned                       # what the bot has learned so far
 
 Most day-1 Time Trial and Mastery routes don't list `run_for_time_supported`, so grind skips them
 unless you pass `--accept-timer`. Each such start can spend one ranked attempt on a 30-second clock.
-Grind never asks the advisor while a clock is running.
+When a timed attempt has questions no handler answers, grind learns from it anyway. Asking the
+advisor takes minutes, so that attempt runs out, and the next start is where the new handler gets
+used. That retry doesn't count against `--fresh-variants`. Each start is printed with the seconds on
+the clock and the ranked attempts left. A challenge spends at most 1 + `--episodes` +
+`--fresh-variants` timed starts in one run. On a timed attempt, answers still go one at a time while
+the clock allows, so a refusal names the wrong one. When the deadline gets close, the rest go in one
+request.
 
 Challenges without files work too. If the reply only names an answer id, the bot submits an
 `issued_flag` the reply hands out. Otherwise it fetches the page the prompt links, plus the scripts
