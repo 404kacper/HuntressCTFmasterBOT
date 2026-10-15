@@ -89,6 +89,64 @@ def handler(*, priority: int = 100, lanes: tuple[str, ...] = (), challenges: tup
 
 def solve(attempt: Attempt, artifacts: ArtifactSet) -> Solution:
     load_handlers()
+    sol = _solve(attempt, artifacts)
+    # Mastery asks the Time Trial question set once per download ("set2.marker" about download 2).
+    # Each set is also solved on its own, prefix off and only its own download in view, so the
+    # handlers that answer Time Trial answer Mastery too; the more confident answer wins.
+    for n, (sub, arts, back) in _sets(attempt, artifacts).items():
+        part = _solve(sub, arts)
+        for qid, ans in part.answers.items():
+            have = sol.answers.get(back[qid])
+            if have is None or ans.confidence > have.confidence:
+                ans.evidence = f"{ans.evidence} [set {n}, its own download]"
+                sol.answers[back[qid]] = ans
+                sol.unresolved.pop(back[qid], None)
+        sol.notes += [f"set {n}: {note}" for note in part.notes]
+    return sol
+
+
+_SET_ID = re.compile(r"^set[\s#_-]*(\d+)[.:/_-](.+)$", re.I)
+_DELIVERY_LABEL = re.compile(r"^(?:delivery|download|bundle|package|set)[\s#_-]*(\d+)\s*(?:[:/|]\s*|$)", re.I)
+
+
+def _sets(attempt: Attempt, artifacts: ArtifactSet) -> dict[int, tuple[Attempt, ArtifactSet, dict[str, str]]]:
+    """set number -> (that set as an attempt of its own, its download alone, its question id ->
+    the original id). Empty unless every download is one set: ids 'setN.<id>', one set per download."""
+    tops = artifacts.tops
+    groups: dict[int, list[tuple[str, dict]]] = {}
+    for q in attempt.questions:
+        m = _SET_ID.match(q.id)
+        if not m:
+            continue
+        n = int(m.group(1))
+        if q.raw.get("set") is not None and str(q.raw.get("set")).strip() != str(n):
+            continue
+        chain = q.artifact_chain
+        if chain and (label := _DELIVERY_LABEL.match(chain[0])):
+            if int(label.group(1)) != n:
+                continue  # about another set's download: leave it to the full view
+            rest = chain[0][label.end():].strip()
+            chain = ([rest] if rest else []) + chain[1:]
+        d = {k: v for k, v in q.raw.items() if k not in ("set", "answer_id")}
+        d["id"], d["artifact"] = m.group(2), " -> ".join(chain) or None
+        groups.setdefault(n, []).append((q.id, d))
+    if len(tops) < 2 or len(groups) != len(tops):
+        return {}
+    first = 0 if min(groups) == 0 else 1
+    shared = {k: v for k, v in attempt.raw.items()
+              if k not in ("questions", "tasks", "answer_ids", "download", "downloads", "deliveries", "artifacts")}
+    out = {}
+    for n, qs in groups.items():
+        if not 0 <= n - first < len(tops) or len({d["id"] for _, d in qs}) != len(qs):
+            return {}
+        top = tops[n - first]
+        sub = Attempt.from_response(attempt.challenge, {**shared, "questions": [d for _, d in qs]})
+        arts = ArtifactSet([("" if top.name_is_guess else top.name, top.data)])
+        out[n] = (sub, arts, {d["id"]: qid for qid, d in qs})
+    return out
+
+
+def _solve(attempt: Attempt, artifacts: ArtifactSet) -> Solution:
     ctx = Context(attempt, artifacts)
     unresolved: dict[str, str] = {}
     notes: list[str] = []

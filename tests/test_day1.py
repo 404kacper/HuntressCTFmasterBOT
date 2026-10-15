@@ -146,6 +146,35 @@ class ReplyShapes(unittest.TestCase):
         from hunt.solvers import Context
         self.assertIsNone(file_name(a.questions[0], Context(a, ArtifactSet([("evidence.zip", b"PK")]))))
 
+    def test_mastery_sets_are_answered_by_the_time_trial_handler(self):
+        from hunt import solvers
+
+        # A Time Trial handler: knows only the plain id and assumes the one download.
+        @solvers.handler(lanes=("test-mastery",))
+        def first_line(q, ctx):
+            if q.id != "first-line":
+                return None
+            return Answer(ctx.artifacts.tops[0].data.decode().splitlines()[0], 0.95, "first line of the download")
+
+        def q(n, label=""):
+            return {"id": f"set{n}.first-line", "set": n, "question": "What is the first line?",
+                    "artifact": f"{label}note.txt", "answer_format": {"kind": "exact_text"}}
+
+        try:
+            a = Attempt.from_response("test-mastery-day-01/mastery", {
+                "lane": "test-mastery", "questions": [q(1), q(2, "delivery 2: ")],
+                "answer_ids": ["set1.first-line", "set2.first-line"]})
+            sol = solve(a, ArtifactSet([("note.txt", b"alpha\n"), ("note.txt", b"beta\n")]))
+            self.assertEqual(sol.answers["set1.first-line"].value, "alpha")
+            self.assertEqual(sol.answers["set2.first-line"].value, "beta")
+            self.assertIn("set 2, its own download", sol.answers["set2.first-line"].evidence)
+            self.assertEqual(sol.unresolved, {})
+            # one download for two sets: no per-set view, so nothing is guessed
+            one = solve(a, ArtifactSet([("note.txt", b"alpha\n")]))
+            self.assertEqual(one.answers, {})
+        finally:
+            solvers._HANDLERS[:] = [r for r in solvers._HANDLERS if r.fn is not first_line]
+
     def test_short_lane_names_still_scope(self):
         from hunt.solvers import _Reg
         reg = _Reg(100, "x", lambda q, c: None, ("binary",), ())
