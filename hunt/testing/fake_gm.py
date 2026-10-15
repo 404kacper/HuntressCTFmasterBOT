@@ -145,6 +145,7 @@ class Base64Challenge:
         # timed_start: every start/retry runs a clock, asked for or not (live Time Trial / Mastery routes)
         self.timed_start = False
         self.time_limit = 30.0
+        self.attempts_left: int | None = None  # starts allowed in all (None: unlimited); then retry says 409
         self.ranked_left = 20
         self.attempt: dict | None = None
         self.history: list[dict] = []
@@ -221,6 +222,8 @@ class Base64Challenge:
         if op == "retry":
             if a and a["state"] == "active" and not self._expired(a):
                 return 409, {"error": "finish the current attempt before retrying"}
+            if self.attempts_left is not None and len(self.history) >= self.attempts_left:
+                return 409, {"error": "no attempts remaining for this mode"}
             self._new(bool(body.get("run_for_time")))
             return 200, self.view()
         return 400, {"error": f"unknown op {op!r}"}

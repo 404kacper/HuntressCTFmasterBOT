@@ -381,6 +381,7 @@ def grind_one(gm: GameMaster, archive: Archive, library: Library, advisor: Advis
     still_open: set[str] = set()  # attempts whose retry got 409: open, whatever their result says
     announced: set[str] = set()  # timed attempts whose clock was reported
     learned_on_clock = False  # a module was learned from the current timed attempt
+    retry_refused = ""  # what the Game Master said when it answered a retry with 409
     last_id: str | None = None
     raw: dict = {}
     try:
@@ -408,6 +409,7 @@ def grind_one(gm: GameMaster, archive: Archive, library: Library, advisor: Advis
                     # until solved); keep working on it.
                     if last_id:
                         still_open.add(last_id)
+                    retry_refused = str(e)
                 else:
                     if learned_on_clock:
                         log("  (the clock ran out while the bot was learning; this variant is where the new "
@@ -424,6 +426,14 @@ def grind_one(gm: GameMaster, archive: Archive, library: Library, advisor: Advis
             last_id = o.attempt.attempt_id if o.attempt else None
             if scored(raw):
                 res.status, res.detail, res.pending = "already", "the attempt is already solved", pending(raw)
+                return res
+            if lost(raw) and last_id and last_id in still_open \
+                    and str(raw.get("result") or "").upper() not in ("INCORRECT", "WRONG"):
+                # A 409 said "still open", yet the attempt has expired or failed: the retry was
+                # refused for another reason (often: no attempts left on this route).
+                res.status = "error"
+                res.detail = (f"the attempt is over ({raw.get('result')}) and the Game Master refused a fresh one "
+                              f"({retry_refused}); check `hunt status {cid}`: this route may have no attempts left")
                 return res
             if lost(raw) and not (last_id and last_id in still_open):
                 log(f"  the current attempt is over ({raw.get('result')}); asking for a fresh one")

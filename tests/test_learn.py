@@ -334,6 +334,21 @@ class Grinding(unittest.TestCase):
         self.assertNotEqual(res[BASED].status, "scored", self.log)
         self.assertEqual(len(self.based.history), 2, self.log)  # one lesson, one free start: never a third
 
+    def test_a_refused_retry_on_an_expired_attempt_says_why(self):
+        # Mastery with two attempts, both lost to the clock; the third start is refused.
+        self.based.timed_start, self.based.attempts_left = True, 2
+
+        def clock_runs_out(message, n):
+            self.based.attempt["state"] = "expired"  # the answer took longer than the clock
+            self.based.time_limit = 0.0  # and every later attempt is over before it is answered
+            return _block(GOOD)
+
+        res = self._grind(ScriptedAdvisor(clock_runs_out), ids=[BASED], accept_timer=True)
+        self.assertEqual(res[BASED].status, "error", self.log)
+        self.assertIn("no attempts remaining for this mode", res[BASED].detail)
+        self.assertIn("hunt status", res[BASED].detail)
+        self.assertEqual(len(self.based.history), 2)
+
     def test_timed_answers_go_singly_while_the_clock_allows(self):
         self.based.timed_start = True  # 30 s: plenty for two round trips
         self.lib.install("base64_note", GOOD, challenge=BASED, advisor="test", rounds=1)
