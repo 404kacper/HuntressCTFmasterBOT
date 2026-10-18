@@ -39,6 +39,19 @@
       "updated": "20261015T214222Z",
       "versions": 4
     },
+    "jscript_descriptor_plan": {
+      "advisor": "cli",
+      "challenge": "script-analysis-day-02-encoded-intent/mastery",
+      "proven": "20261018T204739Z",
+      "proven_on": [
+        "script-analysis-day-02-encoded-intent/mastery"
+      ],
+      "replaced": null,
+      "rounds": 3,
+      "status": "proven",
+      "updated": "20261018T204727Z",
+      "versions": 3
+    },
     "mobile_puzzle_answer_code": {
       "advisor": "cli",
       "challenge": "mobile-android-day-01-exported-trust",
@@ -57,11 +70,12 @@
     "powershell_fixture_indicators": {
       "advisor": "cli",
       "challenge": "script-analysis-day-01-native-signals",
-      "proven": "20261015T212307Z",
+      "proven": "20261018T204739Z",
       "proven_on": [
         "script-analysis-day-01-native-signals",
         "script-analysis-day-01-native-signals/time_trial",
-        "script-analysis-day-01-native-signals/mastery"
+        "script-analysis-day-01-native-signals/mastery",
+        "script-analysis-day-02-encoded-intent/mastery"
       ],
       "replaced": null,
       "rounds": 1,
