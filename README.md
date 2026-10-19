@@ -84,6 +84,11 @@ If something is still unanswered and the mode has 2 or fewer attempts left (or M
 grind doesn't start. It stops and names what's missing. At 0 attempts left it stops without asking
 for one. `--no-preflight` skips both checks.
 
+When a mode has no fresh attempts left, the Game Master offers `practice` (`next_op: "practice"`).
+That gives the last artifact again, untimed, and it **still completes the mode**: you get the
+points, but no Hall of Fame time. grind switches to it by itself instead of asking for a retry
+that would be refused. With no clock running, it can also learn on that copy.
+
 When questions arrive as `setN.<id>`, one set per download, the solver also answers each set on its
 own: prefix removed, only that set's download in view. So the handlers learned on Time Trial answer
 Mastery too.

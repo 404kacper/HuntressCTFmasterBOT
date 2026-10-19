@@ -395,12 +395,27 @@ class Grinding(unittest.TestCase):
         self.assertEqual(mastery.history, [])  # nothing spent
         self.assertFalse((self.root / "runs" / f"{BASED}_mastery-rehearsal").exists())  # nothing to learn with
 
-    def test_no_attempts_left_stops_before_asking_for_one(self):
+    def test_with_no_attempts_left_the_mode_is_completed_by_practice(self):
         self.lib.install("base64_note", GOOD, challenge=BASED, advisor="test", rounds=1)
         mastery = self._route("mastery", attempts_left=1, report_attempts=True, timed_start=True, time_limit=0.0)
         res = self._grind(None, ids=[mastery.id], accept_timer=True)
-        self.assertEqual(res[mastery.id].status, "stuck", self.log)
-        self.assertIn("no attempts left on this mode", res[mastery.id].detail)
+        self.assertEqual(res[mastery.id].status, "scored", self.log)
+        self.assertEqual(len(mastery.history), 1)  # the one timed attempt; practice spends none
+        self.assertFalse(mastery.attempt["timed"])  # solved on the untimed practice copy
+        self.assertTrue(any("practising on the last artifact" in line for line in self.log), self.log)
+
+    def test_practice_also_lets_the_bot_learn_without_a_clock(self):
+        mastery = self._route("mastery", attempts_left=1, report_attempts=True, timed_start=True, time_limit=0.0)
+        res = self._grind(ScriptedAdvisor([_block(GOOD)]), ids=[mastery.id], accept_timer=True)
+        self.assertEqual(res[mastery.id].status, "scored", self.log)
+        self.assertEqual(len(mastery.history), 1)
+
+    def test_a_refused_practice_is_reported(self):
+        self.lib.install("base64_note", GOOD, challenge=BASED, advisor="test", rounds=1)
+        mastery = self._route("mastery", attempts_left=1, report_attempts=True, timed_start=True, time_limit=0.0,
+                              practice_allowed=False)
+        res = self._grind(None, ids=[mastery.id], accept_timer=True)
+        self.assertNotEqual(res[mastery.id].status, "scored", self.log)
         self.assertEqual(len(mastery.history), 1)
 
     def test_timed_answers_go_singly_while_the_clock_allows(self):

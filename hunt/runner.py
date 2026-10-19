@@ -46,8 +46,9 @@ class Outcome:
 def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_retry: bool | None,
          submit: bool, min_confidence: float = DEFAULT_MIN_CONFIDENCE, partial: bool = False,
          prompt: Prompt | None = None, trust_guessed_ids: bool = False,
-         refuse: set[str] | None = None, solver: Solver | None = None) -> Outcome:
-    """use_retry: True sends op=retry, False sends start. None (auto) sends
+         refuse: set[str] | None = None, solver: Solver | None = None, practice: bool = False) -> Outcome:
+    """practice: sends op=practice (no fresh attempts left: the last artifact again, untimed, and it
+    can still complete the mode). Otherwise use_retry: True sends op=retry, False sends start. None (auto) sends
     start, and if that only reconnects to a finished attempt, follows with
     retry. Reconnecting starts no clock, so the extra request costs no time.
 
@@ -60,7 +61,9 @@ def play(gm: GameMaster, archive: Archive, challenge: str, *, timed: bool, use_r
     t0 = clock()
     retried = False
     try:
-        if use_retry:
+        if practice:
+            data = gm.practice(challenge)
+        elif use_retry:
             data = gm.retry(challenge, run_for_time=rft)
             retried = True
         else:

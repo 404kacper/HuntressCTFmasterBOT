@@ -284,6 +284,16 @@ def use_alternatives(o: Outcome, refused: dict[str, set[str]], min_confidence: f
     return changed
 
 
+def practice_offered(*replies: dict) -> bool:
+    """The Game Master has no fresh attempt left for this mode and offers practice instead: the
+    last artifact again, untimed, which can still complete the mode (no Hall of Fame time)."""
+    return any(str((r or {}).get("next_op") or "").lower() == "practice" or attempts_left(r) == 0
+               for r in replies)
+
+
+PRACTICE_STARTS = 3  # practice requests per challenge mode in one run
+
+
 def _unanswered(dec) -> list[str]:
     """Questions held for a reason a handler could fix (not how answer ids map)."""
     return [qid for qid, why in dec.held.items() if not _id_hold(why)]
@@ -476,6 +486,8 @@ def grind_one(gm: GameMaster, archive: Archive, library: Library, advisor: Advis
     # and spends one of a few attempts, so the bot only starts one once it is ready.
     timed_route = bool(mode(cid)) and not entry.get("run_for_time_supported")
     offline_episodes = 0
+    practices = 0  # practice requests sent (no fresh attempts left on this mode)
+    practice_next = False
 
     def preflight() -> list[str]:
         """Offline, before a new timed attempt: learn from every layout of this challenge the
@@ -526,7 +538,19 @@ def grind_one(gm: GameMaster, archive: Archive, library: Library, advisor: Advis
             if stop:
                 res.detail = stop
                 return res
-        for _ in range(2 + 2 * opts.episodes + opts.fresh_variants + opts.alternatives):
+        for _ in range(2 + 2 * opts.episodes + opts.fresh_variants + opts.alternatives + PRACTICE_STARTS):
+            if use_retry and practice_offered(raw, st):
+                # Retry would only be refused: the mode is completed on the last artifact, untimed.
+                if practices >= PRACTICE_STARTS:
+                    res.detail = (f"no fresh attempts left, and {practices} practice attempt(s) did not complete "
+                                  f"the mode; check `hunt status {cid}`")
+                    return res
+                if not practices:
+                    log("  no fresh attempts left on this mode: practising on the last artifact instead "
+                        "(untimed; it still completes the mode, without a Hall of Fame time)")
+                practices += 1
+                practice_next, use_retry = True, False
+                refused.clear()
             if use_retry:
                 if not untimed_retry:
                     res.detail = ("the attempt is over and this route has no untimed retry (no "
@@ -566,7 +590,8 @@ def grind_one(gm: GameMaster, archive: Archive, library: Library, advisor: Advis
                 use_retry = False
             o = play(gm, archive, cid, timed=False, use_retry=False, submit=False,
                      min_confidence=opts.min_confidence, trust_guessed_ids=opts.trust_guessed_ids,
-                     solver=box.get())
+                     solver=box.get(), practice=practice_next)
+            practice_next = False
             raw = o.attempt.raw if o.attempt else {}
             last_id = o.attempt.attempt_id if o.attempt else None
             if scored(raw):

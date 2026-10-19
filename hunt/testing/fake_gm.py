@@ -147,6 +147,7 @@ class Base64Challenge:
         self.time_limit = 30.0
         self.attempts_left: int | None = None  # starts allowed in all (None: unlimited); then retry says 409
         self.report_attempts = False  # replies carry unique_attempts_remaining, like the live Mastery route
+        self.practice_allowed = True  # once the attempts are used up: op=practice on the last artifact
         self.ranked_left = 20
         self.attempt: dict | None = None
         self.history: list[dict] = []
@@ -191,7 +192,9 @@ class Base64Challenge:
     def view(self) -> dict:
         d = self._view()
         if self.report_attempts and self.attempts_left is not None:
-            d["unique_attempts_remaining"] = max(self.attempts_left - len(self.history), 0)
+            d["unique_attempts_remaining"] = left = max(self.attempts_left - len(self.history), 0)
+            if left == 0 and self.practice_allowed:
+                d["next_op"] = "practice"
         return d
 
     def _view(self) -> dict:
@@ -232,6 +235,17 @@ class Base64Challenge:
             if self.attempts_left is not None and len(self.history) >= self.attempts_left:
                 return 409, {"error": "no attempts remaining for this mode"}
             self._new(bool(body.get("run_for_time")))
+            return 200, self.view()
+        if op == "practice":
+            # Live guidance: after all fresh variants are used, practice continues on the last
+            # artifact without a timer and can still complete the mode. It spends no attempt.
+            if not (self.practice_allowed and a and self.attempts_left is not None
+                    and len(self.history) >= self.attempts_left):
+                return 409, {"error": "practice_not_available"}
+            self._expired(a)
+            if a["state"] in ("expired", "failed"):
+                self.attempt = {**a, "id": secrets.token_hex(8), "state": "active", "accepted": set(),
+                                "timed": False, "deadline": None}
             return 200, self.view()
         return 400, {"error": f"unknown op {op!r}"}
 
