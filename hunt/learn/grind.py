@@ -28,7 +28,7 @@ from ..solvers import SET_ID
 from ..solvers import solve as builtin_solve
 from . import packet
 from . import policy
-from .advisor import TRUNCATED, Advisor, AdvisorError, Conversation, extract_module
+from .advisor import TRUNCATED, Advisor, AdvisorError, Conversation, extract_module, one_line
 from .library import Library, module_of, valid_name
 from .sandbox import Sandbox
 from .trial import failing_runs, run_trial
@@ -315,6 +315,12 @@ def practice_offered(*replies: dict) -> bool:
 PRACTICE_STARTS = 3  # practice requests per challenge mode in one run
 
 
+def few(ids, shown: int = 6) -> str:
+    """'a, b, c, … (+69 more)': question ids for a log line that stays one line."""
+    ids = list(ids)
+    return ", ".join(ids[:shown]) + (f", … (+{len(ids) - shown} more)" if len(ids) > shown else "")
+
+
 def _unanswered(dec) -> list[str]:
     """Questions held for a reason a handler could fix (not how answer ids map)."""
     return [qid for qid, why in dec.held.items() if not _id_hold(why)]
@@ -420,7 +426,7 @@ def learn(convo: Conversation, library: Library, archive: Archive, o: Outcome, e
             reply = convo.ask(message)
         except AdvisorError as e:
             transcript.write("error", str(e))
-            log(f"    advisor: {e}")
+            log(one_line(f"    advisor: {e}"))
             return None
         transcript.write(f"reply-{convo.served_by or convo.advisor.name}", reply)
         name, source = extract_module(reply)
@@ -527,7 +533,7 @@ def grind_one(gm: GameMaster, archive: Archive, library: Library, advisor: Advis
             convo = convo or advisor.conversation(cid)
             convo.log = log
             log(f"  preflight: {what}; learning from it offline, before any attempt is spent")
-            log(f"  learning: {', '.join(_unanswered(o2.decision))}")
+            log(f"  learning: {few(_unanswered(o2.decision))}")
             name = learn(convo, library, archive, o2, entry, None, opts, log)
             if name is None:
                 return [what]
@@ -728,8 +734,7 @@ def grind_one(gm: GameMaster, archive: Archive, library: Library, advisor: Advis
             episodes += 1
             convo = convo or advisor.conversation(cid)
             convo.log = log
-            held = ", ".join(o.decision.held) or "(answers to revise)"
-            log(f"  learning: {held}")
+            log(f"  learning: {few(o.decision.held) or '(answers to revise)'}")
             name = learn(convo, library, archive, o, entry, feedback, opts, log, refused)
             feedback = None
             if name is None:

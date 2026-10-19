@@ -363,6 +363,50 @@ class AdvisorChain(unittest.TestCase):
         self.assertEqual(seen_models, ["claude-opus-5-5", "claude-opus-4-8"])
         self.assertEqual(convo.served_by, "claude-opus-4-8")
 
+    def test_cli_timeout_gets_one_longer_try(self):
+        import subprocess
+        timeouts = []
+
+        def run(cmd, **kw):
+            timeouts.append(kw["timeout"])
+            if len(timeouts) == 1:
+                raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+            return mock.Mock(stdout=json.dumps({"result": "```python\nx\n```"}).encode(), stderr=b"", returncode=0)
+
+        notes = []
+        with mock.patch.object(advisor_mod.shutil, "which", return_value="claude"), \
+                mock.patch.object(advisor_mod.subprocess, "run", side_effect=run):
+            cli = advisor_mod.CliAdvisor(fallback_models=[], timeout=10.0)
+            convo = cli.conversation("x")
+            convo.log = notes.append
+            self.assertIn("```python", convo.ask("packet"))
+            cli.close(convo)
+        self.assertEqual(timeouts, [10.0, 20.0])
+        self.assertTrue(any("asking once more with 20s" in n for n in notes), notes)
+
+    def test_cli_two_timeouts_are_an_error(self):
+        import subprocess
+
+        def run(cmd, **kw):
+            raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+
+        with mock.patch.object(advisor_mod.shutil, "which", return_value="claude"), \
+                mock.patch.object(advisor_mod.subprocess, "run", side_effect=run):
+            cli = advisor_mod.CliAdvisor(fallback_models=[], timeout=10.0)
+            convo = cli.conversation("x")
+            with self.assertRaises(AdvisorError):
+                convo.ask("packet")
+            cli.close(convo)
+
+    def test_log_lines_stay_one_line(self):
+        from hunt.learn.grind import few
+        self.assertEqual(few(["a", "b"]), "a, b")
+        self.assertEqual(few([f"q{i}" for i in range(10)]), "q0, q1, q2, q3, q4, q5, … (+4 more)")
+        line = advisor_mod.one_line("    advisor: declined (API Error: flagged.\n\nDetails: x" + "y" * 400)
+        self.assertTrue(line.startswith("    advisor: declined (API Error: flagged. Details:"))
+        self.assertNotIn("\n", line)
+        self.assertLessEqual(len(line), 4 + 240)
+
     def test_kimi_request_shape_and_refusal(self):
         posted = []
 

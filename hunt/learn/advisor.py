@@ -64,6 +64,13 @@ _CLI_REFUSAL = re.compile(
     r"|for human review", re.I)
 
 
+def one_line(text: str, limit: int = 240) -> str:
+    """A log line: an error that spans several lines (API errors do) is folded into one and cut."""
+    indent = text[:len(text) - len(text.lstrip(" "))]
+    flat = " ".join(text.split())
+    return indent + (flat if len(flat) <= limit else flat[:limit - 1] + "…")
+
+
 class AdvisorError(Exception):
     pass
 
@@ -165,7 +172,7 @@ class Conversation:
 
     def note(self, text: str) -> None:
         if self.log is not None:
-            self.log(text)
+            self.log(one_line(text))
 
     def ask(self, message: str) -> str:
         reply = self.advisor.reply(self, message)
@@ -339,7 +346,16 @@ class CliAdvisor(Advisor):
             p = subprocess.run(cmd, input=prompt.encode("utf-8"), capture_output=True, cwd=st["dir"],
                                env=env, timeout=self.timeout)
         except subprocess.TimeoutExpired:
-            raise AdvisorError(f"`claude -p` gave no answer within {self.timeout:.0f}s") from None
+            # A big packet (many questions, several files) can take longer than one timeout;
+            # one more try with twice the time before the episode is given up.
+            convo.note(f"    advisor: `claude -p` gave no answer within {self.timeout:.0f}s; "
+                       f"asking once more with {2 * self.timeout:.0f}s")
+            try:
+                p = subprocess.run(cmd, input=prompt.encode("utf-8"), capture_output=True, cwd=st["dir"],
+                                   env=env, timeout=2 * self.timeout)
+            except subprocess.TimeoutExpired:
+                raise AdvisorError(f"`claude -p` gave no answer within {self.timeout:.0f}s, "
+                                   f"nor {2 * self.timeout:.0f}s on a second try") from None
         out = p.stdout.decode("utf-8", "replace")
         try:
             data = json.loads(out)
