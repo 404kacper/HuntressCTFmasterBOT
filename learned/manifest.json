@@ -70,11 +70,12 @@
     "layered_text_decode_slug": {
       "advisor": "cli",
       "challenge": "warmups-day-02",
-      "proven": "20261016T082341Z",
+      "proven": "20261019T111047Z",
       "proven_on": [
         "warmups-day-02",
         "warmups-day-02/time_trial",
-        "warmups-day-02/mastery"
+        "warmups-day-02/mastery",
+        "warmups-day-03"
       ],
       "replaced": null,
       "rounds": 1,
@@ -100,14 +101,15 @@
     "mobile_puzzle_answer_code": {
       "advisor": "cli",
       "challenge": "mobile-android-day-02-deep-link-drift",
-      "proven": "20261016T082127Z",
+      "proven": "20261019T103153Z",
       "proven_on": [
         "mobile-android-day-01-exported-trust",
         "mobile-android-day-01-exported-trust/time_trial",
         "mobile-android-day-01-exported-trust/mastery",
         "mobile-android-day-02-deep-link-drift",
         "mobile-android-day-02-deep-link-drift/time_trial",
-        "mobile-android-day-02-deep-link-drift/mastery"
+        "mobile-android-day-02-deep-link-drift/mastery",
+        "mobile-android-day-03-intent-injection"
       ],
       "replaced": null,
       "rounds": 1,
@@ -131,6 +133,19 @@
       "rounds": 1,
       "status": "proven",
       "updated": "20261015T211747Z",
+      "versions": 1
+    },
+    "text_encoding_facts": {
+      "advisor": "cli+kimi-cli",
+      "challenge": "metadata-forensics-day-03-bom-voyage",
+      "proven": "20261019T103142Z",
+      "proven_on": [
+        "metadata-forensics-day-03-bom-voyage"
+      ],
+      "replaced": null,
+      "rounds": 1,
+      "status": "proven",
+      "updated": "20261019T103112Z",
       "versions": 1
     }
   }
