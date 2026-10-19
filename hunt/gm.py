@@ -46,6 +46,15 @@ class Download:
     redirects: int = 0  # each one may cost a fresh connection to another host
 
 
+# What the Game Master answers when it is busy rather than refusing anything ("temporarily
+# unavailable"): the request was not handled, so sending it again is safe.
+BUSY = frozenset({502, 503, 504})
+RETRY_WAITS = (2.0, 5.0, 12.0)
+# Sending these again after a network error cannot change anything: GETs, start (it
+# reconnects to the same attempt) and practice. retry may spend an attempt and a submit's
+# outcome is unknown, so neither is ever repeated here.
+_REPEATABLE_POSTS = frozenset({"start", "practice"})
+
 _CD_FILENAME = re.compile(r"""filename\*?\s*=\s*(?:UTF-8'')?["']?([^"';]+)""", re.I)
 
 
@@ -59,7 +68,7 @@ def _brief(data) -> str:
 
 class GameMaster:
     def __init__(self, base_url: str | None = None, token: str | None = None,
-                 timeout: float = 20.0, prepare_timeout: float = 180.0):
+                 timeout: float = 20.0, prepare_timeout: float = 180.0, submit_timeout: float = 60.0):
         if token is None:
             token = config.load_token()
         self.base = base_url or config.base_url(token)
@@ -70,7 +79,10 @@ class GameMaster:
         # start/retry can wait while the Game Master prepares a fresh variant;
         # that wait is not on the clock, so give it room instead of giving up.
         self.prepare_timeout = prepare_timeout
+        # A busy server can take well over the usual timeout to judge a large answer set.
+        self.submit_timeout = submit_timeout
         self.clock_offset: float | None = None  # server clock minus ours, seconds (from Date headers)
+        self.retry_waits: tuple[float, ...] = RETRY_WAITS
         s = requests.Session()
         s.trust_env = config.proxy_env_present()
         adapter = HTTPAdapter(pool_connections=4, pool_maxsize=8, max_retries=0)
@@ -109,15 +121,37 @@ class GameMaster:
             raise GMError(f"HTTP {r.status_code}: {_brief(data)}", r.status_code, data)
         return data
 
+    def _again(self, send, what: str, repeatable: bool):
+        """send(), and again (after RETRY_WAITS) while the Game Master answers 'busy', or after a
+        network error when the request is repeatable."""
+        for wait in self.retry_waits + (None,):
+            try:
+                return send()
+            except GMError as e:
+                if wait is None or not (e.status in BUSY or (e.transport and repeatable)):
+                    raise
+                print(f"  (Game Master: {e}; sending {what} again in {wait:.0f}s)", file=sys.stderr, flush=True)
+                time.sleep(wait)
+
     def get(self, **params):
         params = {k: v for k, v in params.items() if v is not None}
-        try:
-            r = self.s.get(self.base, params=params, timeout=self.timeout)
-        except requests.RequestException as e:
-            raise _transport_error(e) from None
-        return self._decode(r)
+
+        def once():
+            try:
+                r = self.s.get(self.base, params=params, timeout=self.timeout)
+            except requests.RequestException as e:
+                raise _transport_error(e, str(params.get("op") or "")) from None
+            return self._decode(r)
+        return self._again(once, str(params.get("op") or "request"), repeatable=True)
 
     def post(self, body: dict, timeout: float | None = None, **params):
+        what = str(body.get("op") or ("submit" if "answers" in body else "start"))
+        if what == "retry":
+            return self._post_once(body, timeout, **params)
+        return self._again(lambda: self._post_once(body, timeout, **params), what,
+                           repeatable=what in _REPEATABLE_POSTS)
+
+    def _post_once(self, body: dict, timeout: float | None = None, **params):
         params = {k: v for k, v in params.items() if v is not None}
         what = str(body.get("op") or ("submit" if "answers" in body else "start"))
         t = time.perf_counter()
@@ -173,8 +207,8 @@ class GameMaster:
 
     def submit(self, challenge: str, answers: dict[str, str]) -> dict:
         # Every answer goes over the wire as a string ("240", not 240).
-        return self.post({"challenge": challenge,
-                          "answers": {str(k): str(v) for k, v in answers.items()}})
+        return self.post({"challenge": challenge, "answers": {str(k): str(v) for k, v in answers.items()}},
+                         timeout=self.submit_timeout)
 
     def download_url(self, download: str | None) -> str | None:
         """Absolute URL for the reply's download link, or None to use the
@@ -207,6 +241,11 @@ class GameMaster:
 
     def artifact(self, challenge: str, download: str | None = None, delivery: int | None = None,
                  fallback_delivery: int | None = None) -> Download:
+        return self._again(lambda: self._artifact_once(challenge, download, delivery, fallback_delivery),
+                           "the artifact download", repeatable=True)
+
+    def _artifact_once(self, challenge: str, download: str | None, delivery: int | None,
+                       fallback_delivery: int | None) -> Download:
         t = time.perf_counter()
         url = self.download_url(download) if delivery is None else None
         r = self._fetch(challenge, url, delivery)

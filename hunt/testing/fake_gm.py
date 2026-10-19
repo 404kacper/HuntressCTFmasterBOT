@@ -309,6 +309,7 @@ class FakeGM:
         self.attempt: _Attempt | None = None
         self.history: list[_Attempt] = []
         self.lock = threading.Lock()
+        self.busy_next = 0  # the next N requests get 503 temporarily_unavailable
         self.server: ThreadingHTTPServer | None = None
 
     # ---- game logic ---------------------------------------------------------
@@ -448,6 +449,12 @@ class FakeGM:
                     self.wfile.write(payload)
 
             def _auth(self) -> bool:
+                with gm.lock:
+                    busy = gm.busy_next > 0
+                    gm.busy_next -= busy
+                if busy:  # like the live server under load
+                    self._send(503, b'{"error":"temporarily_unavailable"}', "application/json")
+                    return False
                 if self.headers.get("Authorization") != f"Bearer {gm.token}":
                     self._send(401, b'{"error":"unauthorized"}', "application/json")
                     return False

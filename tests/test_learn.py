@@ -19,11 +19,11 @@ from unittest import mock
 from hunt import cli
 from hunt.archive import Archive
 from hunt.forensics.artifacts import ArtifactSet
-from hunt.gm import GameMaster
+from hunt.gm import GameMaster, GMError
 from hunt.learn import advisor as advisor_mod
 from hunt.learn import packet, policy
 from hunt.learn.advisor import SYSTEM_PROMPT, ScriptedAdvisor, extract_module
-from hunt.learn.grind import GrindOptions, grind, order
+from hunt.learn.grind import GrindOptions, grind, order, send_answers
 from hunt.learn.library import Library
 from hunt.learn.sandbox import Sandbox, clean_env
 from hunt.learn.trial import run_trial
@@ -571,6 +571,60 @@ class ApiBackend(unittest.TestCase):
         self.assertEqual(kw["system"][0]["cache_control"], {"type": "ephemeral"})
         self.assertEqual([m["role"] for m in kw["messages"]], ["user", "assistant", "user"])
         self.assertEqual(kw["thinking"], {"type": "adaptive"})  # Opus 4.8 thinks only when asked to
+
+
+class ServerHiccups(unittest.TestCase):
+    """The live Game Master answers 503 temporarily_unavailable or times out under load."""
+
+    def setUp(self):
+        self.fake = FakeGM(mode="trio", seed=21)
+        self.gm = GameMaster(base_url=self.fake.start_server(), token=self.fake.token)
+        self.gm.retry_waits = (0.01, 0.01, 0.01)
+        self.addCleanup(self.fake.stop)
+
+    def test_busy_replies_are_sent_again(self):
+        self.fake.busy_next = 2
+        with redirect_stdout(io.StringIO()), mock.patch("sys.stderr", io.StringIO()):
+            self.assertIn("status", self.gm.status(CID))
+            self.gm.start(CID)  # a POST too
+        self.assertEqual(self.fake.busy_next, 0)
+
+    def test_still_busy_after_every_wait_is_an_error(self):
+        self.fake.busy_next = 10
+        with mock.patch("sys.stderr", io.StringIO()), self.assertRaises(GMError) as cm:
+            self.gm.status(CID)
+        self.assertEqual(cm.exception.status, 503)
+
+    def test_retry_is_never_sent_twice(self):
+        self.fake.busy_next = 1
+        with self.assertRaises(GMError):
+            self.gm.retry(CID)
+        self.assertEqual(self.fake.busy_next, 0)  # one request, not repeated
+
+
+class SubmitWithoutReply(unittest.TestCase):
+    def _gm(self, status: dict, second=None):
+        lost_reply = GMError("network error: ReadTimeout after 60.0s (submit)", transport=True)
+        return mock.Mock(submit=mock.Mock(side_effect=[lost_reply, second or {"result": "CORRECT"}]),
+                         status=mock.Mock(return_value=status))
+
+    def test_open_attempt_gets_the_same_answers_again(self):
+        gm = self._gm({"attempt_id": "a1"})
+        reply = send_answers(gm, mock.Mock(challenge="x", attempt_id="a1"), {"q": "1"})
+        self.assertEqual(reply["result"], "CORRECT")
+        self.assertEqual(gm.submit.call_count, 2)
+
+    def test_an_attempt_that_scored_meanwhile_is_not_sent_again(self):
+        gm = self._gm({"result": "CORRECT", "solved_by": {"name": "me"}})
+        self.assertEqual(send_answers(gm, mock.Mock(challenge="x", attempt_id="a1"), {"q": "1"})["result"], "CORRECT")
+        self.assertEqual(gm.submit.call_count, 1)
+
+    def test_an_attempt_that_ended_or_was_replaced_keeps_the_error(self):
+        for st in ({"result": "expired", "deadline": "2026-10-16T08:21:06Z"}, {"attempt_id": "another"}):
+            gm = self._gm(st)
+            with self.assertRaises(GMError):
+                send_answers(gm, mock.Mock(challenge="x", attempt_id="a1"), {"q": "1"})
+            self.assertEqual(gm.submit.call_count, 1)
 
 
 if __name__ == "__main__":

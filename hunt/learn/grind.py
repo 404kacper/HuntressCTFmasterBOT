@@ -140,6 +140,27 @@ class Verdict:
     batched: int = 0  # answers sent together because the clock left no time to send them singly
 
 
+def send_answers(gm: GameMaster, attempt, group: dict[str, str]) -> dict:
+    """gm.submit; when it gets no reply at all, the Game Master is asked how the attempt stands
+    before the same answers go once more: solved counts as solved, and an attempt that is over or
+    was replaced is not sent to again (the error stands)."""
+    try:
+        return gm.submit(attempt.challenge, group)
+    except GMError as e:
+        if not e.transport:
+            raise
+        try:
+            st = gm.status(attempt.challenge)
+        except GMError:
+            raise e from None
+        if scored(st):
+            return {"result": "CORRECT", "status": st.get("status")}
+        now = st.get("attempt_id") or st.get("attempt")
+        if lost(st) or (now and attempt.attempt_id and now != attempt.attempt_id):
+            raise e from None
+        return gm.submit(attempt.challenge, group)
+
+
 # Sending answers singly on a timed attempt costs one round trip each; keep this much in hand.
 _CLOCK_MARGIN = 3.0
 _RTT_SLACK = 1.5
@@ -175,7 +196,7 @@ def submit_stepwise(gm: GameMaster, o: Outcome, library: Library, one_by_one: bo
             group, items = dict(items), []
         t = time.perf_counter()
         try:
-            reply = gm.submit(attempt.challenge, group)
+            reply = send_answers(gm, attempt, group)
         except GMError as e:
             v.steps.append({"sent": group, "error": str(e), "data": e.data})
             v.message = f"submit failed: {e}"

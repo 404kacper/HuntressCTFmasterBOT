@@ -407,8 +407,8 @@ class AgainstFakeGameMaster(unittest.TestCase):
             time.sleep(1.0)
             return orig(answers)
         fake._submit = slow
-        o = play(GameMaster(url, fake.token, timeout=0.3), Archive(self.runs), CID, timed=False,
-                 use_retry=False, submit=True)
+        o = play(GameMaster(url, fake.token, timeout=0.3, submit_timeout=0.3), Archive(self.runs), CID,
+                 timed=False, use_retry=False, submit=True)
         self.assertEqual(o.status, "submitted")
         self.assertIn("UNKNOWN", o.message)
         (run,) = Archive(self.runs).runs(CID)
@@ -498,10 +498,19 @@ class AgainstFakeGameMaster(unittest.TestCase):
         self.assertLess(o.timings["on-clock(approx)"], 1.0)  # the preparation wait is not counted
         fake2, url2 = self._fake(seed=18, prepare_delay=1.0)
         gm2 = GameMaster(url2, fake2.token, timeout=0.3, prepare_timeout=0.3)
+        gm2.retry_waits = ()  # no second start
         o2 = play(gm2, Archive(self.runs), CID, timed=True, use_retry=None, submit=True)
         self.assertEqual(o2.status, "gm-error")
         self.assertIn("hunt status", o2.message)
         self.assertIn("start", o2.message)
+        # With the usual second try, start reconnects to the attempt the server did open.
+        fake3, url3 = self._fake(seed=19, prepare_delay=1.0)
+        gm3 = GameMaster(url3, fake3.token, timeout=0.3, prepare_timeout=0.3)
+        gm3.retry_waits = (1.5,)
+        with mock.patch("sys.stderr", io.StringIO()):
+            o3 = play(gm3, Archive(self.runs), CID, timed=True, use_retry=None, submit=True)
+        self.assertEqual((o3.status, (o3.reply or {}).get("result")), ("submitted", "CORRECT"))
+        self.assertEqual(len(fake3.history), 1)  # one attempt, reconnected to
 
     def test_root_relative_links_behind_the_homebase_proxy(self):
         # Live failure: '/artifact/x' resolved outside http://10.0.0.219/huntress-ctf-proxy and 404ed.
