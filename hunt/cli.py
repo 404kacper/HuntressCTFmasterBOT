@@ -352,11 +352,19 @@ def cmd_ping(args) -> int:
     return 0
 
 
+_DAY_IN_ID = re.compile(r"-day-0*(\d+)(?=[-/]|$)")
+
+
 def _resolve(gm: GameMaster, wanted: str) -> tuple[str | None, dict | None]:
     """Accept a challenge id or its display name. Returns (id, list entry);
     id is None when the choice is ambiguous or unknown (and says why)."""
     try:
         rows = gm.list()
+        # An unfiltered list may hold only day 1; an id names its own day ("...-day-02-...").
+        day = _DAY_IN_ID.search(wanted)
+        if day and not any(r.get("id") == wanted for r in rows):
+            seen = {r.get("id") for r in rows}
+            rows = rows + [r for r in gm.list(day=int(day.group(1))) if r.get("id") not in seen]
     except GMError as e:
         print(f"(could not list challenges: {e}; using {wanted!r} as the id)")
         return wanted, None

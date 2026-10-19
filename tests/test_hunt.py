@@ -468,6 +468,14 @@ class AgainstFakeGameMaster(unittest.TestCase):
             self.assertEqual(cli._resolve(gm, "nothing like it"), (None, None))
         self.assertEqual(out.getvalue().count("-mastery"), 2)
 
+    def test_a_later_days_id_is_found_although_the_plain_list_is_day_1(self):
+        day1 = [{"id": "warmups-day-01", "name": "A Little Based"}]
+        day2 = [{"id": "binary-reverse-engineering-day-02-cpp-and-pe-orientation/mastery", "name": "Mangled"}]
+        gm = mock.Mock(list=mock.Mock(side_effect=lambda day=None, lane=None: day2 if day == 2 else day1))
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(cli._resolve(gm, day2[0]["id"]), (day2[0]["id"], day2[0]))
+            self.assertEqual(cli._resolve(gm, "warmups-day-01")[0], "warmups-day-01")
+
     def test_finished_attempt_detected_even_with_a_download_link(self):
         from hunt.runner import _finished
         self.assertTrue(_finished(CID, {"result": "CORRECT", "download": "?op=artifact", "questions": LIVE_QS}))
