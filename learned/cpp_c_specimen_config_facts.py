@@ -5,7 +5,15 @@ has_symtab, recover_code, machine, format, xor_key, config_crc32) and the
 C++ facts (vtable/typeinfo presence, mangled symbols) plus indicators
 (campaign, domain, url, mutex) from the single-byte-XOR'd JSON config blob.
 Everything is derived from the bytes; the C++ specimen is identified by
-content (libstdc++ / Itanium or MSVC mangling), not by file name."""
+content (libstdc++ / Itanium or MSVC mangling), not by file name.
+
+Mangled-symbol questions: ELF answers come from the defined function in the
+symbol table (the first string carrying the name). MinGW PE images keep
+COMDAT section symbols in the COFF string table (.text$<sym>, .xdata$<sym>,
+.pdata$<sym>); the Game Master refused the bare Itanium name for a PE, so
+for PE specimens the full strings carrying the mangled name are offered in
+file order (first one as the value), followed by the bare name and other
+spellings as alternatives. Evidence lines record where the strings live."""
 import json
 import re
 import struct
@@ -38,6 +46,17 @@ _STD = {"main", "deregister_tm_clones", "register_tm_clones", "frame_dummy",
 _CPP_FIELDS = {"has_cpp_vtable", "has_cpp_typeinfo", "vtable_symbol", "format",
                "xor_key", "config_crc32"}
 _CFG_FIELDS = {"campaign", "domain", "url", "mutex"}
+
+_ITA = re.compile(rb"_Z[A-Za-z0-9_]{3,}(?:\.[A-Za-z0-9_]+)*")
+_MSV = re.compile(rb"\?\??[A-Za-z0-9_$][A-Za-z0-9_@?$]{2,}")
+_U16 = re.compile(rb"(?:[\x21-\x7e]\x00){6,}")
+_BUILTIN = {
+    "v": ("void", "X"), "b": ("bool", "_N"), "c": ("char", "D"), "a": ("signed char", "C"),
+    "h": ("unsigned char", "E"), "s": ("short", "F"), "t": ("unsigned short", "G"),
+    "i": ("int", "H"), "j": ("unsigned int", "I"), "l": ("long", "J"),
+    "m": ("unsigned long", "K"), "x": ("long long", "_J"), "y": ("unsigned long long", "_K"),
+    "f": ("float", "M"), "d": ("double", "N"), "w": ("wchar_t", "_W"),
+}
 
 
 def _cstr(blob, off):
@@ -104,6 +123,73 @@ def _elf(raw):
     return {"cls": cls, "e": e, "machine": mach, "secs": secs, "syms": syms, "raw": raw}
 
 
+def _rva2off(pe, rva):
+    for s in pe["secs"]:
+        span = max(s["vsize"], s["rsize"])
+        if s["va"] <= rva < s["va"] + span:
+            d = rva - s["va"]
+            if d < s["rsize"]:
+                return s["rptr"] + d
+            return None
+    return None
+
+
+def _coff(raw, symptr, nsyms):
+    out = []
+    if not symptr or not nsyms or nsyms > 500000 or symptr + nsyms * 18 > len(raw):
+        return out
+    strbase = symptr + nsyms * 18
+    i = 0
+    while i < nsyms:
+        off = symptr + i * 18
+        try:
+            val, secn, typ, scl, naux = struct.unpack_from("<IhHBB", raw, off + 8)
+        except struct.error:
+            break
+        if raw[off:off + 4] == b"\x00\x00\x00\x00":
+            so = struct.unpack_from("<I", raw, off + 4)[0]
+            name = _cstr(raw, strbase + so) if so >= 4 else ""
+        else:
+            name = raw[off:off + 8].split(b"\x00", 1)[0].decode("latin-1")
+        if name:
+            out.append({"name": name, "value": val, "secn": secn, "type": typ, "scl": scl})
+        i += 1 + naux
+    return out
+
+
+def _pe_exports(raw, pe, opt, optsz, magic):
+    if magic == 0x20B:
+        dd = opt + 112
+    elif magic == 0x10B:
+        dd = opt + 96
+    else:
+        return []
+    if dd + 8 > opt + optsz:
+        return []
+    out = []
+    try:
+        rva, size = struct.unpack_from("<II", raw, dd)
+        if not rva or not size:
+            return []
+        off = _rva2off(pe, rva)
+        if off is None:
+            return []
+        nnames, _afun, anames = struct.unpack_from("<III", raw, off + 24)
+        noff = _rva2off(pe, anames)
+        if noff is None:
+            return []
+        for i in range(min(nnames, 20000)):
+            nrva = struct.unpack_from("<I", raw, noff + 4 * i)[0]
+            so = _rva2off(pe, nrva)
+            if so is not None:
+                s = _cstr(raw, so)
+                if s:
+                    out.append(s)
+    except struct.error:
+        return out
+    return out
+
+
 def _pe(raw):
     if not raw or len(raw) < 0x40 or raw[:2] != b"MZ":
         return None
@@ -112,10 +198,27 @@ def _pe(raw):
         if raw[lfa:lfa + 4] != b"PE\x00\x00":
             return None
         mach, nsec, _ts, symptr, nsyms, optsz = struct.unpack_from("<HHIIIH", raw, lfa + 4)
-        magic = struct.unpack_from("<H", raw, lfa + 24)[0] if optsz else 0
+        opt = lfa + 24
+        magic = struct.unpack_from("<H", raw, opt)[0] if optsz else 0
     except struct.error:
         return None
-    return {"machine": mach, "symptr": symptr, "nsyms": nsyms, "magic": magic}
+    pe = {"machine": mach, "symptr": symptr, "nsyms": nsyms, "magic": magic,
+          "secs": [], "coff": [], "exports": []}
+    strbase = symptr + nsyms * 18 if (symptr and nsyms) else None
+    base = opt + optsz
+    for i in range(min(nsec, 96)):
+        o = base + i * 40
+        try:
+            vsize, va, rsize, rptr = struct.unpack_from("<IIII", raw, o + 8)
+        except struct.error:
+            break
+        nm = raw[o:o + 8].split(b"\x00", 1)[0].decode("latin-1")
+        if nm.startswith("/") and nm[1:].isdigit() and strbase is not None:
+            nm = _cstr(raw, strbase + int(nm[1:])) or nm
+        pe["secs"].append({"name": nm, "va": va, "vsize": vsize, "rsize": rsize, "rptr": rptr})
+    pe["coff"] = _coff(raw, symptr, nsyms)
+    pe["exports"] = _pe_exports(raw, pe, opt, optsz, magic)
+    return pe
 
 
 def _v2o(elf, va):
@@ -311,7 +414,8 @@ def _spec_info(m):
         _CACHE[key] = None
         return None
     info = {"m": m, "raw": raw, "sha": key, "elf": elf, "pe": pe,
-            "cpp": _is_cpp(raw), "cfg": None, "cfg_done": False}
+            "cpp": _is_cpp(raw), "cfg": None, "cfg_done": False,
+            "names": None, "sets": None}
     _CACHE[key] = info
     return info
 
@@ -401,24 +505,66 @@ def _values(obj, out):
 
 
 def _all_names(info):
+    if info.get("names") is not None:
+        return info["names"]
     names = []
     if info["elf"] is not None:
         for s in info["elf"]["syms"]:
             names.append(s["name"])
-    for mm in re.finditer(rb"_Z[A-Za-z0-9_]{3,}|\?\?_7[A-Za-z0-9_@?$]+|\?[A-Za-z_][A-Za-z0-9_@?$]+@@[A-Za-z0-9_@?$]*",
-                          info["raw"]):
-        names.append(mm.group(0).decode("latin-1"))
-    out = []
+    if info["pe"] is not None:
+        for s in info["pe"]["coff"]:
+            names.append(s["name"])
+        names.extend(info["pe"]["exports"])
+    raw = info["raw"]
+    blobs = [raw]
+    for mm in _U16.finditer(raw):
+        try:
+            blobs.append(mm.group(0).decode("utf-16le").encode("latin-1"))
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            pass
+    for blob in blobs:
+        for mm in _ITA.finditer(blob):
+            names.append(mm.group(0).decode("latin-1"))
+        for mm in _MSV.finditer(blob):
+            n = mm.group(0).decode("latin-1")
+            if "@@" in n or n.startswith("??_7"):
+                names.append(n)
+    out, seen = [], set()
     for n in names:
-        if n not in out:
+        if n and n not in seen:
+            seen.add(n)
             out.append(n)
+    info["names"] = out
     return out
 
 
+def _symsets(info):
+    if info.get("sets") is None:
+        fn, df, und = set(), set(), set()
+        if info["elf"] is not None:
+            for s in info["elf"]["syms"]:
+                if s["shndx"] == 0:
+                    und.add(s["name"])
+                else:
+                    df.add(s["name"])
+                    if s["stype"] == 2:
+                        fn.add(s["name"])
+        if info["pe"] is not None:
+            for s in info["pe"]["coff"]:
+                if s["secn"] > 0:
+                    df.add(s["name"])
+                    if (s["type"] >> 4) == 2:
+                        fn.add(s["name"])
+                elif s["secn"] == 0:
+                    und.add(s["name"])
+            for n in info["pe"]["exports"]:
+                df.add(n)
+        info["sets"] = (fn, df, und)
+    return info["sets"]
+
+
 def _defined(info, name):
-    if info["elf"] is None:
-        return False
-    return any(s["name"] == name and s["shndx"] != 0 for s in info["elf"]["syms"])
+    return name in _symsets(info)[1]
 
 
 def _cls_of(name):
@@ -434,12 +580,50 @@ def _cls_of(name):
     return mm.group(1) if mm else None
 
 
+def _sym_kind(n):
+    b = n[1:] if n.startswith("__Z") else n
+    if b.startswith("_Z"):
+        if b.startswith(("_ZTh", "_ZTv", "_ZTc")):
+            return "thunk"
+        if b.startswith(("_ZT", "_ZGV", "_ZZ", "_ZGR")):
+            return None
+        return "ita"
+    if n.startswith("?"):
+        if "@@" not in n or n.startswith(("??_", "?AV", "?AU", "?AW", "?AT")):
+            return None
+        return "msvc"
+    return None
+
+
 def _mangled(info, word):
-    cands = [n for n in _all_names(info)
-             if word in n.lower() and (n.startswith("_Z") or n.startswith("?"))
-             and not n.startswith("_ZT") and not n.startswith("??_")]
-    cands.sort(key=lambda n: (not _defined(info, n), "@" in n and n.startswith("_Z")))
-    return cands
+    fn, df, und = _symsets(info)
+    is_pe = info["pe"] is not None
+    cands = []
+    for idx, n in enumerate(_all_names(info)):
+        kind = _sym_kind(n)
+        if kind is None or word not in n.lower():
+            continue
+        if kind == "msvc" and is_pe:
+            rank = -1
+        elif n in fn:
+            rank = 0
+        elif n in df:
+            rank = 1
+        elif n in und:
+            rank = 3
+        else:
+            rank = 2
+        if kind == "thunk":
+            rank += 4
+        if ".cold" in n:
+            sub = 2
+        elif "." in n:
+            sub = 0 if is_pe else 1
+        else:
+            sub = 1 if is_pe else 0
+        cands.append(((rank, sub, idx), n))
+    cands.sort()
+    return [n for _k, n in cands]
 
 
 def _vtables(info, prefer_cls):
@@ -448,6 +632,324 @@ def _vtables(info, prefer_cls):
     vt.sort(key=lambda n: (_cls_of(n) != prefer_cls if prefer_cls else False,
                            not _defined(info, n)))
     return vt
+
+
+def _runs(raw, name, limit=12):
+    """Full printable strings (file order) that carry `name`, e.g. the
+    COMDAT section symbols .text$<name> / .xdata$<name> / .pdata$<name>."""
+    nb = name.encode("latin-1")
+    out = []
+    pos = raw.find(nb)
+    while pos >= 0 and len(out) < limit:
+        a = pos
+        while a > 0 and 0x20 < raw[a - 1] < 0x7F and pos - a < 200:
+            a -= 1
+        b = pos + len(nb)
+        while b < len(raw) and 0x20 < raw[b] < 0x7F and b - pos < 400:
+            b += 1
+        tok = raw[a:b].decode("latin-1")
+        if tok not in out:
+            out.append(tok)
+        pos = raw.find(nb, pos + 1)
+    return out
+
+
+def _ident(s, i):
+    mm = re.match(r"\d+", s[i:])
+    if not mm:
+        return None, i
+    k = int(mm.group(0))
+    j = i + len(mm.group(0))
+    if k <= 0 or j + k > len(s):
+        return None, i
+    return s[j:j + k], j + k
+
+
+def _itanium(name):
+    s = name[1:] if name.startswith("__Z") else name
+    s = s.split(".", 1)[0]
+    if not s.startswith("_Z"):
+        return None
+    i, n = 2, len(s)
+    const = False
+    comps = []
+    if s[i:i + 1] == "N":
+        i += 1
+        while s[i:i + 1] in ("K", "V", "r"):
+            if s[i] == "K":
+                const = True
+            i += 1
+        while i < n and s[i] != "E":
+            part, i2 = _ident(s, i)
+            if part is None:
+                return None
+            comps.append(part)
+            i = i2
+        if i >= n:
+            return None
+        i += 1
+    else:
+        part, i2 = _ident(s, i)
+        if part is None:
+            return None
+        comps.append(part)
+        i = i2
+    params = []
+    while i < n:
+        j = i
+        while j < n and s[j] in "PKR":
+            j += 1
+        if j >= n or s[j] not in _BUILTIN:
+            return None
+        params.append((s[i:j], s[j]))
+        i = j + 1
+    if not comps or not params:
+        return None
+    return comps, const, params
+
+
+def _ms_param(mods, code, wide):
+    out = ""
+    i = 0
+    while i < len(mods):
+        c = mods[i]
+        if c in ("P", "R"):
+            cst = i + 1 < len(mods) and mods[i + 1] == "K"
+            out += ("P" if c == "P" else "A") + ("E" if wide else "") + ("B" if cst else "A")
+            i += 2 if cst else 1
+        else:
+            i += 1
+    return out + _BUILTIN[code][1]
+
+
+def _dm_param(mods, code):
+    s = _BUILTIN[code][0]
+    for c in reversed(mods):
+        s += {"K": " const", "P": "*", "R": "&"}[c]
+    return s
+
+
+def _dm_west(mods, code):
+    s = _dm_param(mods, code)
+    return re.sub(r"^([a-z_ ]+?) const(?=[*&])", r"const \1", s)
+
+
+def _family(info):
+    """User classes named by vtable/typeinfo symbols (RTTI family)."""
+    out = []
+    for n in _all_names(info):
+        mm = re.match(r"_ZT[VIS](\d+)([A-Za-z_][A-Za-z0-9_]*)$", n)
+        if mm:
+            k = int(mm.group(1))
+            c = mm.group(2)
+            if len(c) == k and c not in out:
+                out.append(c)
+    return out
+
+
+def _synth(info, found):
+    """Other spellings of the found Itanium symbol: (msvc, underscored, demangled, family)."""
+    ita = [n for n in found if _sym_kind(n) == "ita"]
+    if not ita:
+        return [], [], [], []
+    plain = [n for n in ita if "." not in n]
+    base = plain[0] if plain else ita[0].split(".", 1)[0]
+    under = [base[1:]] if base.startswith("__Z") else ["_" + base]
+    parts = _itanium(base)
+    if parts is None:
+        return [], under, [], []
+    comps, const, params = parts
+    pe, elf = info["pe"], info["elf"]
+    wide = True
+    if pe is not None and pe["machine"] == 0x14C:
+        wide = False
+    if elf is not None and elf["cls"] == 1:
+        wide = False
+    if params == [("", "v")]:
+        plist_ms, plist_dm, plist_w = "XZ", "", ""
+    else:
+        plist_ms = "".join(_ms_param(md, c, wide) for md, c in params) + "@Z"
+        plist_dm = ", ".join(_dm_param(md, c) for md, c in params)
+        plist_w = ", ".join(_dm_west(md, c) for md, c in params)
+    qual = "::".join(comps)
+    cst = " const" if const else ""
+    dem = [f"{qual}({plist_dm}){cst}", qual, f"{qual}({plist_dm})", f"{qual}({plist_w}){cst}"]
+    msvc, fam = [], []
+    if len(comps) >= 2:
+        cls = comps[-2]
+        virt = any(n.startswith("_ZTV") and _cls_of(n) == cls for n in _all_names(info))
+        head = "?" + comps[-1] + "@" + "@".join(reversed(comps[:-1])) + "@@"
+        thisq = ("E" if wide else "") + ("B" if const else "A")
+        cc = "A" if wide else "E"
+        pub = ("U", "Q") if virt else ("Q", "U")
+        combos = [(pub[0], "H"), (pub[0], "N"), (pub[1], "H"), (pub[1], "N"),
+                  (pub[0], "M"), (pub[1], "M"), (pub[0], "_N"), (pub[1], "_N"),
+                  ("A", "H"), ("E", "H"), ("I", "H"), ("M", "H"),
+                  ("A", "N"), ("E", "N"), ("I", "N"), ("M", "N")]
+        for acc, ret in combos:
+            msvc.append(head + acc + thisq + cc + ret + plist_ms)
+        mm = re.match(r"(_ZNK?)(\d+)", base)
+        if mm and len(comps) == 2:
+            rest = base[mm.end() + int(mm.group(2)):]
+            for c in _family(info):
+                if c != cls:
+                    fam.append(f"{mm.group(1)}{len(c)}{c}{rest}")
+    else:
+        for ret in ("H", "N"):
+            msvc.append("?" + comps[0] + "@@YA" + ret + plist_ms)
+    return msvc, under, dem, fam
+
+
+def _siblings(info, found):
+    """Defined methods of the class and its RTTI family (same signature first)."""
+    ita = [n for n in found if _sym_kind(n) == "ita"]
+    if not ita:
+        return []
+    p = _itanium(ita[0])
+    if not p or len(p[0]) < 2:
+        return []
+    cls = p[0][-2]
+    fam = _family(info)
+    _fn, df, _und = _symsets(info)
+    buckets = [[], [], [], []]
+    for n in _all_names(info):
+        if n in found or n not in df or _sym_kind(n) != "ita":
+            continue
+        q2 = _itanium(n)
+        if not q2 or len(q2[0]) < 2:
+            continue
+        c2 = q2[0][-2]
+        if c2 != cls and c2 not in fam:
+            continue
+        same = q2[1] == p[1] and q2[2] == p[2]
+        idx = (0 if same else 2) + (0 if c2 == cls else 1)
+        buckets[idx].append(n)
+    return buckets[0] + buckets[1] + buckets[2] + buckets[3]
+
+
+def _cfg_walk(obj, key, word, out):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            _cfg_walk(v, str(k).lower(), word, out)
+    elif isinstance(obj, list):
+        for v in obj:
+            _cfg_walk(v, key, word, out)
+    elif isinstance(obj, str):
+        v = obj.strip()
+        if not v or "\n" in v:
+            return
+        kind = _sym_kind(v)
+        hit = kind in ("ita", "msvc") and word in v.lower()
+        if hit or (word in key and ("symbol" in key or "mangled" in key)):
+            if v not in out:
+                out.append(v)
+
+
+def _cfg_cands(info, word):
+    cfg = _config(info)
+    out = []
+    if cfg is not None:
+        _cfg_walk(cfg["obj"], "", word, out)
+    return out
+
+
+def _hidden(info, word):
+    """Mangled names containing `word` hidden under a single-byte XOR key."""
+    raw = info["raw"]
+    w = word.encode("latin-1")
+    pats = [str(len(word)).encode("latin-1") + w, b"?" + w + b"@"]
+    out = []
+    for k in range(1, 256):
+        t = _TABLES[k]
+        for p in pats:
+            needle = p.translate(t)
+            pos = raw.find(needle)
+            hits = 0
+            while pos >= 0 and hits < 8:
+                hits += 1
+                lo = max(0, pos - 96)
+                win = raw[lo:pos + 160].translate(t)
+                rel = pos - lo
+                for rx in (_ITA, _MSV):
+                    for mm in rx.finditer(win):
+                        if mm.start() <= rel < mm.end():
+                            n = mm.group(0).decode("latin-1")
+                            if _sym_kind(n) in ("ita", "msvc") and n not in out:
+                                out.append(n)
+                pos = raw.find(needle, pos + 1)
+    return out
+
+
+def _where(info, off):
+    pe, elf = info["pe"], info["elf"]
+    if pe is not None:
+        if pe["symptr"] and off >= pe["symptr"]:
+            return "coff-symtab" if off < pe["symptr"] + pe["nsyms"] * 18 else "coff-strtab"
+        for s in pe["secs"]:
+            if s["rptr"] <= off < s["rptr"] + s["rsize"]:
+                return s["name"]
+    if elf is not None:
+        for s in elf["secs"]:
+            if s["type"] != 8 and s["offset"] <= off < s["offset"] + s["size"]:
+                return s["name"]
+    return "?"
+
+
+def _src(info, n):
+    fn, df, _und = _symsets(info)
+    kind = "COFF" if info["pe"] is not None else "ELF"
+    if info["pe"] is not None and n in info["pe"]["exports"]:
+        return "PE export table"
+    if n in fn:
+        return f"{kind} symbol table (defined function)"
+    if n in df:
+        return f"{kind} symbol table (defined)"
+    pos = info["raw"].find(n.encode("latin-1"))
+    if pos >= 0:
+        return f"string in {_where(info, pos)}"
+    return "decoded/UTF-16 string"
+
+
+def _summary(info, word, found):
+    """One-line provenance summary for PE specimens (kept in evidence)."""
+    parts = []
+    if found:
+        parts.append(f"{found[0]} from {_src(info, found[0])}")
+        ita = [n for n in found if _sym_kind(n) == "ita"]
+        if ita:
+            parts.append("strings " + " ".join(_runs(info["raw"], ita[0], 6)))
+    pe = info["pe"]
+    if pe is not None:
+        low = info["raw"].lower()
+        w = word.encode("latin-1")
+        hits = []
+        pos = low.find(w)
+        while pos >= 0 and len(hits) < 6:
+            hits.append(f"0x{pos:x}:{_where(info, pos)}")
+            pos = low.find(w, pos + 1)
+        parts.append(f"PE coff={len(pe['coff'])} exports={len(pe['exports'])}")
+        parts.append("raw hits " + ",".join(hits))
+    return "; ".join(parts)[:500]
+
+
+def _diag(info, word, found, bad):
+    raw, pe, m = info["raw"], info["pe"], info["m"]
+    print(f"[mangled-diag] {m.path} found={found} refused={sorted(bad)}")
+    ita = [n for n in found if _sym_kind(n) == "ita"]
+    if ita:
+        print(f"[mangled-diag] strings carrying {ita[0]}: {_runs(raw, ita[0])}")
+    if pe is not None:
+        secnames = [s["name"] for s in pe["secs"]]
+        print(f"[mangled-diag] PE machine=0x{pe['machine']:x} magic=0x{pe['magic']:x} "
+              f"coff_syms={len(pe['coff'])} exports={len(pe['exports'])} sections={secnames}")
+        shown = 0
+        for s in pe["coff"]:
+            if word in s["name"].lower():
+                print(f"  coff {s['name']} sec={s['secn']} type=0x{s['type']:x} "
+                      f"scl={s['scl']} val=0x{s['value']:x}")
+                shown += 1
+                if shown >= 20:
+                    break
 
 
 @handler(lanes=("binary-reverse-engineering",))
@@ -614,11 +1116,50 @@ def specimen_field(q, ctx):
         return answer("true" if has else "false", f"RTTI/typeinfo symbols in {where}", conf, subject=m)
 
     if mang:
-        c = _mangled(info, mang.group(1))
-        if not c:
-            return answer("none", f"no mangled {mang.group(1)} symbol in {where}", 0.85, subject=m)
-        return answer(c[0], f"mangled symbol containing '{mang.group(1)}' in {where}",
-                      conf if len(c) == 1 else 0.9, subject=m, alternatives=c[1:])
+        word = mang.group(1).lower()
+        found = _mangled(info, word)
+        bad = set(_refused(q))
+        hidden = []
+        for x in _cfg_cands(info, word) + _hidden(info, word):
+            if x not in found and x not in hidden:
+                hidden.append(x)
+        msvc, under, dem, fam = _synth(info, found)
+        sib = _siblings(info, found)
+        summ = _summary(info, word, found)
+        if pe is not None or not found:
+            _diag(info, word, found, bad)
+        if elf is not None and found:
+            primary = found + hidden
+            tail = msvc[:4] + under + dem[:1]
+            top_conf = conf if len(found) == 1 else min(conf, 0.9)
+            how = "defined symbol"
+        else:
+            # PE: MinGW keeps COMDAT section symbols (.text$<sym>, .xdata$<sym>,
+            # .pdata$<sym>) in the COFF string table. The Game Master refused the
+            # bare Itanium name for a PE, so offer the full strings carrying the
+            # mangled name in file order (first one first), then the rest.
+            runs = []
+            for x in [y for y in found if _sym_kind(y) == "ita"][:3]:
+                for r in _runs(raw, x):
+                    if r not in runs:
+                        runs.append(r)
+            primary = hidden + runs + found
+            tail = ["none"] + sib + msvc + dem + under + fam
+            top_conf = min(conf, 0.9)
+            how = "first string carrying the mangled symbol"
+        opts = []
+        for x in primary + tail:
+            if x and x not in opts and x == x.strip() and "\n" not in x:
+                opts.append(x)
+        if not opts:
+            return None
+        if not primary:
+            return answer(opts[0], f"no mangled {word} symbol in {where}; {summ}", 0.85,
+                          subject=m, alternatives=opts[1:])
+        pos = raw.find(opts[0].encode("latin-1"))
+        loc = _where(info, pos) if pos >= 0 else "decoded data"
+        return answer(opts[0], f"{how} containing '{word}' ({loc}) in {where}; {summ}",
+                      top_conf, subject=m, alternatives=opts[1:])
 
     if field == "vtable_symbol":
         sc = _mangled(info, "score")
@@ -626,11 +1167,21 @@ def specimen_field(q, ctx):
         vt = _vtables(info, prefer)
         if not vt:
             return answer("none", f"no vtable symbol in {where}", 0.85, subject=m)
-        alts = vt[1:]
+        alts = []
+        if pe is not None:
+            for r in _runs(raw, vt[0]):
+                if r != vt[0] and r not in alts:
+                    alts.append(r)
+        for x in vt[1:]:
+            if x not in alts:
+                alts.append(x)
         cl = _cls_of(vt[0])
         if cl:
             alts.append(f"vtable for {cl}")
-        return answer(vt[0], f"vtable symbol in {where}", conf if len(vt) == 1 else 0.9,
+        why = f"vtable symbol in {where}"
+        if pe is not None:
+            why += "; " + _summary(info, "score", sc)
+        return answer(vt[0], why, conf if len(vt) == 1 else 0.9,
                       subject=m, alternatives=alts)
 
     cfg = _config(info)

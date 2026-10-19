@@ -1,18 +1,19 @@
 {
   "modules": {
     "cpp_c_specimen_config_facts": {
-      "advisor": "cli",
-      "challenge": "binary-reverse-engineering-day-02-cpp-and-pe-orientation",
-      "proven": "20261016T082052Z",
+      "advisor": "cli+kimi-cli",
+      "challenge": "binary-reverse-engineering-day-02-cpp-and-pe-orientation/mastery",
+      "proven": "20261019T093605Z",
       "proven_on": [
         "binary-reverse-engineering-day-02-cpp-and-pe-orientation",
-        "binary-reverse-engineering-day-02-cpp-and-pe-orientation/time_trial"
+        "binary-reverse-engineering-day-02-cpp-and-pe-orientation/time_trial",
+        "binary-reverse-engineering-day-02-cpp-and-pe-orientation/mastery"
       ],
       "replaced": null,
-      "rounds": 2,
+      "rounds": 1,
       "status": "proven",
-      "updated": "20261016T070002Z",
-      "versions": 1
+      "updated": "20261019T093510Z",
+      "versions": 4
     },
     "elf_function_return_constant": {
       "advisor": "cli",
@@ -40,16 +41,14 @@
     "elf_slot_field_facts": {
       "advisor": "cli",
       "challenge": "binary-reverse-engineering-day-01-c-elf-orientation/mastery",
-      "proven": "20261015T214017Z",
+      "proven": "20261019T093801Z",
       "proven_on": [
-        "binary-reverse-engineering-day-01-c-elf-orientation/time_trial"
+        "binary-reverse-engineering-day-01-c-elf-orientation/time_trial",
+        "binary-reverse-engineering-day-01-c-elf-orientation/mastery"
       ],
-      "replaced": {
-        "file": "elf_slot_field_facts-20261015T214222Z.py",
-        "status": "candidate"
-      },
+      "replaced": null,
       "rounds": 1,
-      "status": "candidate",
+      "status": "proven",
       "updated": "20261015T214222Z",
       "versions": 4
     },
