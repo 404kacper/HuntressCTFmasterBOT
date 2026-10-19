@@ -1,5 +1,15 @@
 {
   "modules": {
+    "bre_managed_config_facts": {
+      "advisor": "cli+kimi-cli",
+      "challenge": "binary-reverse-engineering-day-03-managed-configuration",
+      "proven_on": [],
+      "replaced": null,
+      "rounds": 3,
+      "status": "candidate",
+      "updated": "20261019T125908Z",
+      "versions": 1
+    },
     "cpp_c_specimen_config_facts": {
       "advisor": "cli+kimi-cli",
       "challenge": "binary-reverse-engineering-day-02-cpp-and-pe-orientation/mastery",
@@ -101,7 +111,7 @@
     "mobile_puzzle_answer_code": {
       "advisor": "cli",
       "challenge": "mobile-android-day-02-deep-link-drift",
-      "proven": "20261019T103153Z",
+      "proven": "20261019T130900Z",
       "proven_on": [
         "mobile-android-day-01-exported-trust",
         "mobile-android-day-01-exported-trust/time_trial",
@@ -109,7 +119,9 @@
         "mobile-android-day-02-deep-link-drift",
         "mobile-android-day-02-deep-link-drift/time_trial",
         "mobile-android-day-02-deep-link-drift/mastery",
-        "mobile-android-day-03-intent-injection"
+        "mobile-android-day-03-intent-injection",
+        "mobile-android-day-03-intent-injection/time_trial",
+        "mobile-android-day-03-intent-injection/mastery"
       ],
       "replaced": null,
       "rounds": 1,
