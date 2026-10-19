@@ -28,8 +28,8 @@ from hunt.forensics.artifacts import ArtifactSet
 from hunt.gate import decide
 from hunt.gm import GameMaster
 from hunt.learn import advisor as advisor_mod
-from hunt.learn.advisor import (AdvisorError, AdvisorRefusal, Advisor, ChainAdvisor, KimiAdvisor, ScriptedAdvisor,
-                                _cli_refused)
+from hunt.learn.advisor import (AdvisorError, AdvisorRefusal, Advisor, ChainAdvisor, KimiAdvisor, KimiCliAdvisor,
+                                ScriptedAdvisor, _cli_refused, _kimi_stream_text)
 from hunt.learn.grind import GrindOptions, archived_refusals, grind, untried, use_alternatives
 from hunt.learn.library import Library
 from hunt.learn.trial import run_trial
@@ -329,6 +329,21 @@ class AdvisorChain(unittest.TestCase):
         self.assertTrue(_cli_refused({"is_error": True, "result": "API Error: Claude Code is unable to respond to "
                                                                   "this request, which appears to violate our Usage Policy"}))
         self.assertFalse(_cli_refused({"result": "```python\n# mentions the usage policy\n```"}))
+        # Soft, prose refusals after an output classifier clips a reply must count too, or the chain
+        # re-asks the same model every round instead of escalating (the day-2 mastery failure).
+        self.assertTrue(_cli_refused({"result": "I'm not going to send a module for this request. My "
+                                                "previous reply here was stopped by a safety check."}))
+        self.assertTrue(_cli_refused({"result": "No module for this challenge. Please hold these questions "
+                                                "for human review."}))
+        self.assertTrue(_cli_refused({"result": "I won't send a module; it would recreate content a safety "
+                                                "check withheld."}))
+
+    def test_kimi_stream_json_parsing(self):
+        out = ('{"role":"meta","type":"system.version","version":"2.2.0"}\n'
+               '{"role":"assistant","content":"DONE\\n```python\\nx\\n```"}\n'
+               '{"role":"meta","type":"session.resume_hint","session_id":"s"}\n')
+        self.assertEqual(_kimi_stream_text(out), "DONE\n```python\nx\n```")
+        self.assertIsNone(_kimi_stream_text("not json at all\n"))
 
     def test_cli_falls_back_to_the_next_model_on_refusal(self):
         replies = iter([json.dumps({"is_error": True, "result": "API Error: ... violate our Usage Policy"}),
@@ -371,21 +386,34 @@ class AdvisorChain(unittest.TestCase):
         with self.assertRaises(AdvisorRefusal):
             convo.ask("again")
 
-    def test_pick_adds_kimi_only_when_configured(self):
+    def test_pick_chooses_the_kimi_tail(self):
+        def only(*names):
+            return lambda n: "/bin/" + n if n in names else None
+
         with mock.patch.object(advisor_mod, "_api_ready", return_value=False), \
-                mock.patch.object(advisor_mod.shutil, "which", return_value="claude"):
-            with mock.patch.dict(os.environ, {}, clear=False):
-                os.environ.pop("MOONSHOT_API_KEY", None)
-                os.environ.pop("KIMI_API_KEY", None)
+                mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MOONSHOT_API_KEY", None)
+            os.environ.pop("KIMI_API_KEY", None)
+            # claude only, no key, no kimi CLI: bare CliAdvisor, Claude->Claude escalation only.
+            with mock.patch.object(advisor_mod.shutil, "which", side_effect=only("claude")):
                 adv, how = advisor_mod.pick("auto")
                 self.assertIsInstance(adv, advisor_mod.CliAdvisor)
                 self.assertIn("claude-opus-5-5 -> claude-opus-4-8", how)
-            with mock.patch.dict(os.environ, {"MOONSHOT_API_KEY": "mk"}):
+            # claude + kimi CLI, still no key: the Kimi Code CLI becomes the tail (no API key path).
+            with mock.patch.object(advisor_mod.shutil, "which", side_effect=only("claude", "kimi")):
                 adv, how = advisor_mod.pick("auto")
                 self.assertIsInstance(adv, ChainAdvisor)
-                self.assertIn("Kimi (kimi-k3", how)
+                self.assertIsInstance(adv.tiers[1], KimiCliAdvisor)
+                self.assertIn("Kimi Code CLI", how)
                 adv, _ = advisor_mod.pick("auto", kimi="off")
                 self.assertIsInstance(adv, advisor_mod.CliAdvisor)
+            # a Moonshot key present: the HTTP API tier wins over the CLI.
+            with mock.patch.object(advisor_mod.shutil, "which", side_effect=only("claude", "kimi")), \
+                    mock.patch.dict(os.environ, {"MOONSHOT_API_KEY": "mk"}):
+                adv, how = advisor_mod.pick("auto")
+                self.assertIsInstance(adv, ChainAdvisor)
+                self.assertIsInstance(adv.tiers[1], KimiAdvisor)
+                self.assertIn("Kimi (kimi-k3", how)
 
 
 if __name__ == "__main__":

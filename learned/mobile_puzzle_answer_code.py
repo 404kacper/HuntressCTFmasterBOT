@@ -2,69 +2,148 @@
 """Return the backend answer/evidence code for Huntress mobile APK challenges.
 
 The APK ships an assets/*puzzle*.json fixture carrying the answer under a
-"data" field, optionally encoded (codec: plain | base64 | hex). The answer
-matches the declared pattern (e.g. ANS- + 16 uppercase hex). We read the
-fixture, decode per its codec, and return the matching token. Falls back to
-scanning every member's bytes for a token matching the answer pattern."""
+"data"-like field, encoded by a declared codec (plain, base64, hex, reverse,
+rot13, xor, url, or chains like "base64+reverse"). We decode per the declared
+codec; if that does not yield a token matching the answer pattern we try a
+fixed set of transform chains. Falls back to scanning member bytes (forward
+and reversed) for a token matching the answer pattern."""
 import base64
 import binascii
+import codecs
+import itertools
 import json
 import re
+import urllib.parse as urlparse
 
 from hunt.learn.kit import answer, files, data, target, text
 from hunt.solvers import handler
 
+_KEYS = ("data", "answer", "flag", "code", "payload", "value", "token", "blob")
+
 
 def _pattern_from_format(q):
-    """Build a regex from the answer_format syntax when it names a prefix+hex."""
     syn = (q.syntax or "")
     m = re.search(r"([A-Za-z]+-)\s*followed by\s*(?:exactly\s*)?(\d+)\s*uppercase hex", syn, re.I)
     if m:
-        prefix = re.escape(m.group(1))
-        n = int(m.group(2))
-        return re.compile(prefix + "[0-9A-F]{" + str(n) + "}")
+        return re.compile(re.escape(m.group(1)) + "[0-9A-F]{" + m.group(2) + "}(?![0-9A-Fa-f])")
     m = re.search(r"([A-Za-z]+-)\s*followed by\s*(?:exactly\s*)?(\d+)\s*hex", syn, re.I)
     if m:
-        prefix = re.escape(m.group(1))
-        n = int(m.group(2))
-        return re.compile(prefix + "[0-9A-Fa-f]{" + str(n) + "}")
-    # generic: PREFIX- followed by run of hex/alnum
+        return re.compile(re.escape(m.group(1)) + "[0-9A-Fa-f]{" + m.group(2) + "}(?![0-9A-Fa-f])")
     return re.compile(r"[A-Z]{2,5}-[0-9A-F]{8,}")
 
 
-def _decode(value, codec):
-    codec = (codec or "plain").lower()
-    if codec in ("plain", "none", "", "utf-8", "utf8", "text"):
-        return value
-    if codec in ("base64", "b64"):
+def _b64(v):
+    s = v.strip()
+    try:
+        return base64.b64decode(s + "=" * (-len(s) % 4)).decode("utf-8")
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        pass
+    try:
+        return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4)).decode("utf-8")
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        return None
+
+
+def _hex(v):
+    try:
+        return bytes.fromhex(v.strip()).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+def _b32(v):
+    s = v.strip().upper()
+    try:
+        return base64.b32decode(s + "=" * (-len(s) % 8)).decode("utf-8")
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        return None
+
+
+_OPS = {
+    "reverse": lambda v: v[::-1],
+    "base64": _b64,
+    "hex": _hex,
+    "base32": _b32,
+    "rot13": lambda v: codecs.encode(v, "rot13"),
+    "url": lambda v: urlparse.unquote(v),
+}
+_ALIAS = {
+    "reversed": "reverse", "rev": "reverse", "reverse_string": "reverse",
+    "b64": "base64", "base64url": "base64", "base16": "hex", "b32": "base32",
+    "rot-13": "rot13", "urlencode": "url", "percent": "url",
+}
+
+
+def _xor(v, key):
+    raw = None
+    for dec in (lambda s: bytes.fromhex(s), lambda s: base64.b64decode(s + "=" * (-len(s) % 4))):
         try:
-            return base64.b64decode(value + "===").decode("utf-8", "replace")
-        except (binascii.Error, ValueError):
-            return value
-    if codec in ("hex", "base16"):
-        try:
-            return bytes.fromhex(value).decode("utf-8", "replace")
-        except ValueError:
-            return value
-    if codec in ("rot13",):
-        import codecs as _c
-        return _c.encode(value, "rot13")
-    return value
+            raw = dec(v.strip())
+            break
+        except (ValueError, binascii.Error):
+            continue
+    if raw is None:
+        return None
+    if isinstance(key, int):
+        kb = bytes([key & 0xFF])
+    elif isinstance(key, str):
+        k = key.strip()
+        if re.fullmatch(r"0x[0-9a-fA-F]+", k):
+            kb = bytes([int(k, 16) & 0xFF])
+        elif k.isdigit():
+            kb = bytes([int(k) & 0xFF])
+        else:
+            kb = k.encode()
+    else:
+        return None
+    if not kb:
+        return None
+    return bytes(b ^ kb[i % len(kb)] for i, b in enumerate(raw)).decode("latin-1")
+
+
+def _declared(value, codec, obj):
+    steps = [s for s in re.split(r"[\s+|,>/;-]+", str(codec or "plain").lower()) if s]
+    cur = value
+    for s in steps:
+        s = _ALIAS.get(s, s)
+        if s in ("plain", "none", "text", "utf8", "utf-8", "identity", "raw"):
+            continue
+        if s == "xor":
+            cur = _xor(cur, obj.get("key", obj.get("xor_key")))
+        elif s in _OPS:
+            cur = _OPS[s](cur)
+        else:
+            return None
+        if cur is None:
+            return None
+    return cur
+
+
+def _brute(value, pat):
+    names = list(_OPS)
+    for depth in (0, 1, 2, 3):
+        for chain in itertools.product(names, repeat=depth):
+            cur = value
+            for s in chain:
+                cur = _OPS[s](cur) if cur is not None else None
+            if cur is None:
+                continue
+            hit = pat.search(cur)
+            if hit:
+                return hit.group(0), "+".join(chain) or "plain"
+    return None, None
 
 
 @handler(lanes=("mobile-android",))
 def puzzle_answer(q, ctx):
     pat = _pattern_from_format(q)
-    # Mastery hands out one APK per set: answer each question from its own delivery only.
     root = target(q, ctx)
     if root is None and len(ctx.artifacts.tops) > 1:
         return None
     members = files(ctx, root)
 
-    # 1) Prefer a puzzle/fixture JSON that explicitly carries the answer.
     for m in members:
-        name = (m.basename or "").lower()
-        if not name.endswith(".json"):
+        if not (m.basename or "").lower().endswith(".json"):
             continue
         body = text(m)
         if not body:
@@ -75,33 +154,31 @@ def puzzle_answer(q, ctx):
             continue
         if not isinstance(obj, dict):
             continue
-        codec = obj.get("codec")
-        for key in ("data", "answer", "flag", "code", "payload"):
+        codec = obj.get("codec") or obj.get("encoding")
+        for key in _KEYS:
             val = obj.get(key)
-            if isinstance(val, str) and val:
-                dec = _decode(val, codec)
-                hit = pat.search(dec)
-                if hit:
-                    v = hit.group(0)
-                    v = v[:-16] + v[-16:].upper() if False else v  # noop guard
-                    return answer(v, f"'{key}' field (codec={codec or 'plain'}) of {m.path}", 0.96, subject=m)
+            if not isinstance(val, str) or not val:
+                continue
+            dec = _declared(val, codec, obj)
+            hit = pat.search(dec) if dec else None
+            if hit:
+                return answer(hit.group(0), f"'{key}' of {m.path} decoded with declared codec "
+                                            f"{codec or 'plain'}", 0.96, subject=m)
+            v, chain = _brute(val, pat)
+            if v:
+                print(f"declared codec {codec!r} failed; {chain} worked")
+                return answer(v, f"'{key}' of {m.path} decoded via {chain} "
+                                 f"(declared codec {codec})", 0.92, subject=m)
 
-    # 2) Fall back: scan every member's bytes/strings for a matching token.
     for m in members:
         raw = data(m)
         if not raw:
             continue
-        try:
-            blob = raw.decode("latin-1")
-        except (UnicodeDecodeError, AttributeError):
-            continue
-        hits = pat.findall(blob)
-        # de-dup preserving order
+        blob = raw.decode("latin-1")
         uniq = []
-        for h in hits:
+        for h in pat.findall(blob) + pat.findall(blob[::-1]):
             if h not in uniq:
                 uniq.append(h)
         if len(uniq) == 1:
             return answer(uniq[0], f"token matching answer pattern in {m.path}", 0.9, subject=m)
-
     return None

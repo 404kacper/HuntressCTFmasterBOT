@@ -913,8 +913,9 @@ def main(argv=None) -> int:
                        help="Claude models asked, in order, when the first declines a packet "
                             "(default claude-opus-4-8; 'none' for no fallback)")
         p.add_argument("--kimi", choices=("auto", "on", "off"), default="auto",
-                       help="Kimi as the last resort when every Claude model declined (auto: when "
-                            "MOONSHOT_API_KEY is set; model $HUNT_KIMI_MODEL, default kimi-k3)")
+                       help="Kimi as the last resort when every Claude model declined (auto: the "
+                            "`kimi` CLI on a membership login if on PATH, else the HTTP API when "
+                            "MOONSHOT_API_KEY is set; CLI model $HUNT_KIMI_CLI_MODEL)")
 
     p = sub.add_parser("solve", help="untimed attempt; dry run unless --submit")
     p.add_argument("challenge")

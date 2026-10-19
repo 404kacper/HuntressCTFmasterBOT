@@ -1,5 +1,19 @@
 {
   "modules": {
+    "cpp_c_specimen_config_facts": {
+      "advisor": "cli",
+      "challenge": "binary-reverse-engineering-day-02-cpp-and-pe-orientation",
+      "proven": "20261016T082052Z",
+      "proven_on": [
+        "binary-reverse-engineering-day-02-cpp-and-pe-orientation",
+        "binary-reverse-engineering-day-02-cpp-and-pe-orientation/time_trial"
+      ],
+      "replaced": null,
+      "rounds": 2,
+      "status": "proven",
+      "updated": "20261016T070002Z",
+      "versions": 1
+    },
     "elf_function_return_constant": {
       "advisor": "cli",
       "challenge": "binary-reverse-engineering-day-01-c-elf-orientation/time_trial",
@@ -44,28 +58,63 @@
       "challenge": "script-analysis-day-02-encoded-intent/mastery",
       "proven": "20261018T204739Z",
       "proven_on": [
+        "script-analysis-day-02-encoded-intent",
+        "script-analysis-day-02-encoded-intent/time_trial",
         "script-analysis-day-02-encoded-intent/mastery"
       ],
       "replaced": null,
       "rounds": 3,
       "status": "proven",
       "updated": "20261018T204727Z",
-      "versions": 3
+      "versions": 4
     },
-    "mobile_puzzle_answer_code": {
+    "layered_text_decode_slug": {
       "advisor": "cli",
-      "challenge": "mobile-android-day-01-exported-trust",
-      "proven": "20261015T212217Z",
+      "challenge": "warmups-day-02",
+      "proven": "20261016T082341Z",
       "proven_on": [
-        "mobile-android-day-01-exported-trust",
-        "mobile-android-day-01-exported-trust/time_trial",
-        "mobile-android-day-01-exported-trust/mastery"
+        "warmups-day-02",
+        "warmups-day-02/time_trial",
+        "warmups-day-02/mastery"
       ],
       "replaced": null,
       "rounds": 1,
       "status": "proven",
-      "updated": "20261015T120028Z",
+      "updated": "20261016T072528Z",
       "versions": 1
+    },
+    "leading_bytes_hex": {
+      "advisor": "cli",
+      "challenge": "metadata-forensics-day-02-looks-can-be-deceiving",
+      "proven": "20261016T082115Z",
+      "proven_on": [
+        "metadata-forensics-day-02-looks-can-be-deceiving",
+        "metadata-forensics-day-02-looks-can-be-deceiving/time_trial",
+        "metadata-forensics-day-02-looks-can-be-deceiving/mastery"
+      ],
+      "replaced": null,
+      "rounds": 1,
+      "status": "proven",
+      "updated": "20261016T070311Z",
+      "versions": 1
+    },
+    "mobile_puzzle_answer_code": {
+      "advisor": "cli",
+      "challenge": "mobile-android-day-02-deep-link-drift",
+      "proven": "20261016T082127Z",
+      "proven_on": [
+        "mobile-android-day-01-exported-trust",
+        "mobile-android-day-01-exported-trust/time_trial",
+        "mobile-android-day-01-exported-trust/mastery",
+        "mobile-android-day-02-deep-link-drift",
+        "mobile-android-day-02-deep-link-drift/time_trial",
+        "mobile-android-day-02-deep-link-drift/mastery"
+      ],
+      "replaced": null,
+      "rounds": 1,
+      "status": "proven",
+      "updated": "20261016T070417Z",
+      "versions": 2
     },
     "powershell_fixture_indicators": {
       "advisor": "cli",
@@ -75,6 +124,8 @@
         "script-analysis-day-01-native-signals",
         "script-analysis-day-01-native-signals/time_trial",
         "script-analysis-day-01-native-signals/mastery",
+        "script-analysis-day-02-encoded-intent",
+        "script-analysis-day-02-encoded-intent/time_trial",
         "script-analysis-day-02-encoded-intent/mastery"
       ],
       "replaced": null,
