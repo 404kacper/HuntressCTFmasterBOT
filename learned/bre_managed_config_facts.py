@@ -2,11 +2,10 @@
 """Day-03 'managed configuration' bundle: one evidence.zip with a Day-1 C ELF,
 a Day-2 C++ ELF, and a Day-3 .NET managed PE (+runtimeconfig.json). Answers
 per-day sha256, ELF/PE machine, container+runtime format, ELF type, CLI
-metadata version, the user symbol list, and the extracted malware config.
+metadata version, the SHT_SYMTAB symbol-name list, and the embedded config.
 
 The config is an HCFG-style blob: magic(4) version(1) xorkey(1) len(2 LE)
-crc32(4 LE) then the single-byte-XOR'd JSON payload. The same blob ships in
-the Day-2 ELF .rodata and the Day-3 .NET static array; we find it structurally
+crc32(4 LE) then the single-byte-XOR'd JSON payload. We find it structurally
 (a key byte whose payload XORs to '{' and parses as a JSON object), so renamed
 or re-valued variants still resolve. Gated by the dNN_(artifact|analysis)_ id
 scheme unique to this bundle."""
@@ -35,15 +34,17 @@ _PE_MACH = {
 _ETYPE = {0: "NONE", 1: "REL", 2: "EXEC", 3: "DYN", 4: "CORE"}
 _EDESC = {0: "None", 1: "Relocatable file", 2: "Executable file",
           3: "Shared object file", 4: "Core file"}
-_STD_SYMS = {"main", "deregister_tm_clones", "register_tm_clones", "frame_dummy",
-             "completed.0", "data_start", "crtstuff.c", "crt1.o"}
 
 
 def _cstr(blob, off):
     if off < 0 or off >= len(blob):
         return ""
     end = blob.find(b"\x00", off)
-    return blob[off:(end if end >= 0 else len(blob))].decode("latin-1")
+    raw = blob[off:(end if end >= 0 else len(blob))]
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("latin-1")
 
 
 def _parse_elf(raw):
@@ -79,7 +80,7 @@ def _parse_elf(raw):
             for s in secs:
                 s["name"] = _cstr(tab, s["no"])
     syms = []
-    for s in secs:
+    for si, s in enumerate(secs):
         if s["type"] not in (2, 11) or not (0 <= s["link"] < len(secs)):
             continue
         strs = secs[s["link"]]
@@ -96,7 +97,8 @@ def _parse_elf(raw):
                 break
             name = _cstr(stab, nm)
             syms.append({"name": name, "value": val, "size": size, "bind": info >> 4,
-                         "stype": info & 0xF, "shndx": shndx, "idx": len(syms)})
+                         "stype": info & 0xF, "shndx": shndx, "idx": len(syms),
+                         "tab": s["type"], "sec": si, "entry": i})
     return {"class": cls, "endian": e, "type": etype, "machine": mach, "entry": entry,
             "secs": secs, "syms": syms, "raw": raw}
 
@@ -238,6 +240,43 @@ def _uniq(seq):
     return out
 
 
+def _js(x):
+    return json.dumps(x, separators=(",", ":"), ensure_ascii=False)
+
+
+def _refused(q):
+    if isinstance(q.raw, dict):
+        return q.raw.get("refused_by_game_master") or []
+    return []
+
+
+def _symbol_names(q, elf, prim, day):
+    hay = q.haystack or ""
+    want = 11 if ("dynsym" in hay and "symtab" not in hay) else 2
+    tabname = ".dynsym" if want == 11 else ".symtab"
+    rows = [s for s in elf["syms"] if s["tab"] == want]
+    rows.sort(key=lambda s: (s["sec"], s["entry"]))
+    names = [s["name"] for s in rows if s["name"]]
+    print(f"[mcf] day{day} {tabname} nonempty names ({len(names)}): {names}")
+    if not rows:
+        has_tab = any(s["type"] == want for s in elf["secs"])
+        if not has_tab:
+            return answer("[]", f"no {tabname} section in {prim.path}", 0.9, subject=prim)
+        return None
+    cands = [_js(names)]
+    stripped = [n.split("@")[0] for n in names]
+    if stripped != names:
+        cands.append(_js(stripped))
+    # raw string-table walk as a cross-check spelling (same table, entry order)
+    cands.append(json.dumps(names, ensure_ascii=False))
+    refused = _refused(q)
+    opts = [c for c in _uniq(cands) if c not in refused]
+    if not opts:
+        return None
+    return answer(opts[0], f"all {len(names)} nonempty {tabname} names in entry order of "
+                  f"{prim.path}", 0.95, subject=prim, alternatives=opts[1:])
+
+
 @handler(priority=90, lanes=("binary-reverse-engineering",))
 def managed_config_facts(q, ctx):
     qid = (q.id or "").lower()
@@ -310,24 +349,7 @@ def managed_config_facts(q, ctx):
         return None
 
     if field == "symbols" and elf:
-        ordered = sorted(elf["syms"], key=lambda x: x["idx"])
-        def user(s):
-            n = s["name"]
-            return (n and s["shndx"] != 0 and s["stype"] in (1, 2) and not n.startswith("_")
-                    and n not in _STD_SYMS and "@" not in n and "." not in n)
-        by_idx = _uniq([s["name"] for s in ordered if user(s)])
-        by_val = _uniq([s["name"] for s in sorted([s for s in elf["syms"] if user(s)],
-                                                   key=lambda x: x["value"])])
-        funcs = _uniq([s["name"] for s in ordered if user(s) and s["stype"] == 2])
-        print(f"[mcf] day{day} all symtab: {[s['name'] for s in ordered if s['name']]}")
-        print(f"[mcf] day{day} user by_idx={by_idx} by_val={by_val} funcs={funcs}")
-        if not by_idx:
-            return None
-        def js(x):
-            return json.dumps(x, separators=(",", ":"), ensure_ascii=False)
-        cands = _uniq([by_idx, by_val, by_idx[::-1], funcs, sorted(by_idx)])
-        return answer(js(cands[0]), f"user-defined symbols of {prim.path}", 0.9,
-                      subject=prim, alternatives=[js(c) for c in cands[1:]])
+        return _symbol_names(q, elf, prim, day)
 
     if field == "xor_key_hex" or field.startswith("config_"):
         info = _get_config(raw)

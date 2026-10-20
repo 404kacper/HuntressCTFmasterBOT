@@ -1,7 +1,9 @@
 # learned-module: elf_header_section_symbol_facts
 """Answer ELF orientation questions (class, byte order, machine, type, entry,
-custom section contents, .symtab presence, designated/exported symbol, and the
-constant returned by a named function) by parsing the ELF bytes directly."""
+custom section contents, .symtab presence, designated/exported symbol, the
+constant returned by a named function, and the disassembly of a named FUNC)
+by parsing the ELF bytes directly."""
+import json
 import re
 import struct
 
@@ -22,6 +24,9 @@ _STD_SYMS = {
     "main", "deregister_tm_clones", "register_tm_clones", "frame_dummy",
     "completed.0", "data_start", "crtstuff.c", "crt1.o", "challenge.c",
 }
+
+_R64 = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"]
+_R32 = ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"]
 
 
 def _cstr(blob, off):
@@ -167,6 +172,195 @@ def _pick_elf(q, ctx):
     return pick[0], pick[1], len(exe or custom or cands)
 
 
+# ---------- disassembly ----------
+
+def _imm(v):
+    return f"0x{v:x}"
+
+
+def _disasm_x86(code, bits64):
+    """List of (intel, att) per instruction, or None on an unknown opcode."""
+    out = []
+    i, n = 0, len(code)
+    while i < n:
+        b = code[i]
+        if code[i:i + 4] == b"\xf3\x0f\x1e\xfa":
+            out.append(("endbr64", "endbr64")); i += 4; continue
+        if code[i:i + 4] == b"\xf3\x0f\x1e\xfb":
+            out.append(("endbr32", "endbr32")); i += 4; continue
+        if b == 0xC3:
+            out.append(("ret", "ret")); i += 1; break
+        if code[i:i + 2] == b"\xf3\xc3":
+            out.append(("ret", "ret")); i += 2; break
+        if 0x50 <= b <= 0x57:
+            r = _R64[b - 0x50]; out.append((f"push {r}", f"push %{r}")); i += 1; continue
+        if 0x58 <= b <= 0x5F:
+            r = _R64[b - 0x58]; out.append((f"pop {r}", f"pop %{r}")); i += 1; continue
+        if b == 0xC9:
+            out.append(("leave", "leave")); i += 1; continue
+        if b == 0x90:
+            out.append(("nop", "nop")); i += 1; continue
+        if 0xB8 <= b <= 0xBF and i + 5 <= n:
+            r = _R32[b - 0xB8]; v = struct.unpack_from("<I", code, i + 1)[0]
+            out.append((f"mov {r}, {_imm(v)}", f"mov ${_imm(v)}, %{r}")); i += 5; continue
+        if b in (0x31, 0x33) and i + 2 <= n and (code[i + 1] & 0xC0) == 0xC0:
+            modrm = code[i + 1]; reg = (modrm >> 3) & 7; rm = modrm & 7
+            rr, rm_ = _R32[reg], _R32[rm]
+            if b == 0x31:
+                out.append((f"xor {rm_}, {rr}", f"xor %{rr}, %{rm_}"))
+            else:
+                out.append((f"xor {rr}, {rm_}", f"xor %{rm_}, %{rr}"))
+            i += 2; continue
+        if b == 0x48 and i + 1 < n:
+            b2 = code[i + 1]
+            if b2 == 0x89 and i + 3 <= n and (code[i + 2] & 0xC0) == 0xC0:
+                modrm = code[i + 2]; reg = (modrm >> 3) & 7; rm = modrm & 7
+                out.append((f"mov {_R64[rm]}, {_R64[reg]}",
+                            f"mov %{_R64[reg]}, %{_R64[rm]}")); i += 3; continue
+            if b2 == 0xC7 and i + 7 <= n and (code[i + 2] & 0xF8) == 0xC0:
+                rm = code[i + 2] & 7
+                v = struct.unpack_from("<i", code, i + 3)[0] & 0xFFFFFFFFFFFFFFFF
+                out.append((f"mov {_R64[rm]}, {_imm(v)}",
+                            f"mov ${_imm(v)}, %{_R64[rm]}")); i += 7; continue
+            if 0xB8 <= b2 <= 0xBF and i + 10 <= n:
+                r = _R64[b2 - 0xB8]; v = struct.unpack_from("<Q", code, i + 2)[0]
+                out.append((f"movabs {r}, {_imm(v)}",
+                            f"movabs ${_imm(v)}, %{r}")); i += 10; continue
+            if b2 == 0x31 and i + 3 <= n and (code[i + 2] & 0xC0) == 0xC0:
+                modrm = code[i + 2]; reg = (modrm >> 3) & 7; rm = modrm & 7
+                out.append((f"xor {_R64[rm]}, {_R64[reg]}",
+                            f"xor %{_R64[reg]}, %{_R64[rm]}")); i += 3; continue
+            return None
+        return None
+    return out
+
+
+def _disasm_a64(code, e):
+    out = []
+    for i in range(0, len(code) - 3, 4):
+        w = struct.unpack_from(e + "I", code, i)[0]
+        if w == 0xD65F03C0:
+            out.append(("ret", "ret")); break
+        rd = w & 0x1F
+        sf = (w >> 31) & 1
+        reg = f"{'x' if sf else 'w'}{rd}"
+        imm = (w >> 5) & 0xFFFF
+        hw = (w >> 21) & 3
+        top = w & 0x7F800000
+        shift = f", lsl #{16 * hw}" if hw else ""
+        if top == 0x52800000:
+            s = (f"mov {reg}, #0x{imm:x}",) * 2 if not hw else \
+                (f"movz {reg}, #0x{imm:x}{shift}",) * 2
+            out.append(s)
+        elif top == 0x12800000:
+            out.append((f"movn {reg}, #0x{imm:x}{shift}",) * 2)
+        elif top == 0x72800000:
+            out.append((f"movk {reg}, #0x{imm:x}{shift}",) * 2)
+        else:
+            return None
+    return out
+
+
+def _find_symtab_func(elf, name):
+    for s in elf["symbols"]:
+        if (s["table"] == "symtab" and s["stype"] == 2
+                and s["shndx"] != 0 and s["name"] == name):
+            return s
+    return None
+
+
+def _disasm_sym(elf, sym):
+    va = sym["value"]
+    if elf["machine"] == 40:
+        va &= ~1
+    off = _v2o(elf, va)
+    if off is None:
+        return None, None
+    size = sym["size"] or 64
+    code = elf["raw"][off:off + size]
+    if elf["machine"] in (62, 3):
+        return _disasm_x86(code, elf["machine"] == 62), code
+    if elf["machine"] == 183:
+        return _disasm_a64(code, elf["endian"]), code
+    return None, code
+
+
+_DIS_RE = re.compile(r"find\s+(?:the\s+)?`?([A-Za-z_]\w*)`?\s+func", re.I)
+
+
+def _disasm_target_name(q):
+    m = _DIS_RE.search(q.text or "")
+    return m.group(1) if m else "recover_code"
+
+
+def _is_struct(intel):
+    return intel.startswith((
+        "push ", "pop ", "endbr", "nop", "leave",
+        "mov rbp", "mov ebp", "mov rsp", "mov esp"))
+
+
+def _disasm_candidates(seq, refused):
+    def grp(tuples):
+        intel = [t[0] for t in tuples]
+        att = [t[1] for t in tuples]
+        return [intel,
+                [s.replace(", ", ",") for s in intel],
+                att,
+                [s.replace(", ", ",") for s in att]]
+    groups = [seq]
+    core = [t for t in seq if not _is_struct(t[0])]
+    if core and core != seq:
+        groups.append(core)
+    out = []
+    for g in groups:
+        for arr in grp(g):
+            s = json.dumps(arr, separators=(",", ":"), ensure_ascii=False)
+            for cand in (s, re.sub(r'0x0(?=")', '0', s)):
+                if cand not in out and cand not in refused:
+                    out.append(cand)
+    return out
+
+
+def _handle_disasm(q, ctx):
+    name = _disasm_target_name(q)
+    refused = []
+    if isinstance(q.raw, dict):
+        refused = q.raw.get("refused_by_game_master") or []
+    elfs = []
+    seen = set()
+    for mem in files(ctx):
+        if mem.path in seen:
+            continue
+        seen.add(mem.path)
+        raw = data(mem)
+        el = _parse(raw) if raw else None
+        if el is not None:
+            elfs.append((mem, el))
+    if not elfs:
+        return None
+    chosen = None
+    for mem, el in elfs:
+        sym = _find_symtab_func(el, name)
+        if sym is not None:
+            chosen = (mem, el, sym)
+            break
+    if chosen is None:
+        return answer("[]", f"no .symtab {name} FUNC symbol among ELF members", 0.9)
+    mem, el, sym = chosen
+    seq, code = _disasm_sym(el, sym)
+    print(f"[disasm] {mem.path} {name} va=0x{sym['value']:x} size={sym['size']} "
+          f"bytes={(code or b'').hex()}")
+    if not seq:
+        print(f"[disasm] decode failed for {name}")
+        return None
+    print(f"[disasm] intel={[t[0] for t in seq]}")
+    cands = _disasm_candidates(seq, refused)
+    if not cands:
+        return None
+    return answer(cands[0], f"disassembly of {name} FUNC bytes in {mem.path}",
+                  0.9, subject=mem, alternatives=cands[1:])
+
+
 def _ret_const_x86(code, is64):
     vals = []
     locs = {}
@@ -225,15 +419,15 @@ def _ret_const_a64(code, e):
         top = w & 0x7F800000
         if rd != 0:
             continue
-        if top == 0x52800000:  # MOVZ
+        if top == 0x52800000:
             val = imm << (16 * hw)
-        elif top == 0x12800000:  # MOVN
+        elif top == 0x12800000:
             v = ~(imm << (16 * hw))
             val = v if (w >> 31) else ((v & 0xFFFFFFFF) - (1 << 32) if v & 0x80000000 else v & 0xFFFFFFFF)
-        elif top == 0x72800000 and val is not None:  # MOVK
+        elif top == 0x72800000 and val is not None:
             mask = 0xFFFF << (16 * hw)
             val = (val & ~mask) | (imm << (16 * hw))
-        elif w in (0x2A1F03E0, 0xAA1F03E0):  # mov w0, wzr
+        elif w in (0x2A1F03E0, 0xAA1F03E0):
             val = 0
     if val is not None and 0x80000000 <= val < 0x100000000:
         val -= 1 << 32
@@ -300,7 +494,7 @@ def _type_spellings(elf):
     desc = _TYPE_DESC[t]
     out = []
     if t == 3:
-        pie = 3 in elf["ptypes"]  # PT_INTERP present -> PIE executable
+        pie = 3 in elf["ptypes"]
         pie_desc = "Position-Independent Executable file"
         first, second = (pie_desc, desc) if pie else (desc, pie_desc)
         out += [f"DYN ({first})", f"DYN ({second})", f"ET_{short}", first, second]
@@ -326,6 +520,11 @@ def elf_facts(q, ctx):
             "elf_class", "endianness", "machine", "elf_type", "marker",
             "has_symtab", "exported_symbol", "recover_code", "entry_point"):
         return None
+
+    # Disassembly question: own it so we never fall through to endianness/marker.
+    if "disassembl" in hay or qid.endswith("disassembly"):
+        return _handle_disasm(q, ctx)
+
     mem, elf, ncand = _pick_elf(q, ctx)
     if elf is None:
         return None

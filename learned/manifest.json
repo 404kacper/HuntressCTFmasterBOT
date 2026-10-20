@@ -1,14 +1,41 @@
 {
   "modules": {
+    "batch_control_wrapper": {
+      "advisor": "cli+kimi-cli",
+      "challenge": "script-analysis-day-03-batch-expansion",
+      "proven_on": [],
+      "replaced": {
+        "file": "batch_control_wrapper-20261020T072710Z.py",
+        "status": "candidate"
+      },
+      "rounds": 2,
+      "status": "candidate",
+      "updated": "20261020T072710Z",
+      "versions": 3
+    },
+    "batch_descriptor_plan": {
+      "advisor": "kimi-cli",
+      "challenge": "script-analysis-day-03-batch-expansion",
+      "proven_on": [],
+      "replaced": null,
+      "rounds": 1,
+      "status": "candidate",
+      "updated": "20261020T063918Z",
+      "versions": 1
+    },
     "bre_managed_config_facts": {
       "advisor": "cli+kimi-cli",
       "challenge": "binary-reverse-engineering-day-03-managed-configuration",
-      "proven_on": [],
+      "proven": "20261020T061027Z",
+      "proven_on": [
+        "binary-reverse-engineering-day-03-managed-configuration",
+        "binary-reverse-engineering-day-03-managed-configuration/time_trial"
+      ],
       "replaced": null,
-      "rounds": 3,
-      "status": "candidate",
-      "updated": "20261019T125908Z",
-      "versions": 1
+      "rounds": 1,
+      "status": "proven",
+      "updated": "20261020T060952Z",
+      "versions": 2
     },
     "cpp_c_specimen_config_facts": {
       "advisor": "cli+kimi-cli",
@@ -36,17 +63,33 @@
       "versions": 1
     },
     "elf_header_section_symbol_facts": {
-      "advisor": "cli",
-      "challenge": "binary-reverse-engineering-day-01-c-elf-orientation",
-      "proven": "20261015T211607Z",
+      "advisor": "cli+kimi-cli",
+      "challenge": "binary-reverse-engineering-day-03-managed-configuration",
+      "proven": "20261020T061027Z",
       "proven_on": [
-        "binary-reverse-engineering-day-01-c-elf-orientation"
+        "binary-reverse-engineering-day-01-c-elf-orientation",
+        "binary-reverse-engineering-day-03-managed-configuration",
+        "binary-reverse-engineering-day-03-managed-configuration/time_trial"
       ],
       "replaced": null,
       "rounds": 1,
       "status": "proven",
-      "updated": "20261015T211552Z",
-      "versions": 2
+      "updated": "20261020T060722Z",
+      "versions": 3
+    },
+    "elf_section_name_list": {
+      "advisor": "cli+kimi-cli",
+      "challenge": "binary-reverse-engineering-day-03-managed-configuration",
+      "proven": "20261020T061027Z",
+      "proven_on": [
+        "binary-reverse-engineering-day-03-managed-configuration",
+        "binary-reverse-engineering-day-03-managed-configuration/time_trial"
+      ],
+      "replaced": null,
+      "rounds": 2,
+      "status": "proven",
+      "updated": "20261020T055828Z",
+      "versions": 1
     },
     "elf_slot_field_facts": {
       "advisor": "cli",
@@ -150,9 +193,11 @@
     "text_encoding_facts": {
       "advisor": "cli+kimi-cli",
       "challenge": "metadata-forensics-day-03-bom-voyage",
-      "proven": "20261019T103142Z",
+      "proven": "20261020T061227Z",
       "proven_on": [
-        "metadata-forensics-day-03-bom-voyage"
+        "metadata-forensics-day-03-bom-voyage",
+        "metadata-forensics-day-03-bom-voyage/time_trial",
+        "metadata-forensics-day-03-bom-voyage/mastery"
       ],
       "replaced": null,
       "rounds": 1,
