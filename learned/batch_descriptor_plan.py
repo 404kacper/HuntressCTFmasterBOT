@@ -15,7 +15,7 @@ _SET_ANY = re.compile(
     re.I,
 )
 _FOR = re.compile(
-    r"\bfor\s+(?:/([A-Za-z])\s+)?%%([A-Za-z])\s+in\s*\(([^)]*)\)\s*do\s+(.*)$",
+    r"\bfor\s+(?:/([A-Za-z])\s+)?%%([^\s%\"~()=,;])\s+in\s*\(([^)]*)\)\s*do\s+(.*)$",
     re.I,
 )
 _GOTO = re.compile(r"\bgoto\s+:([A-Za-z_][A-Za-z0-9_]*)\b", re.I)
@@ -211,6 +211,10 @@ def _for_tokens(flag, inner):
     return out[:512]
 
 
+def _for_var(var):
+    return re.compile(r"%%" + re.escape(var) + r"(?![A-Za-z0-9_])", re.I)
+
+
 def _self_wrapper(line):
     low = line.lower()
     if _FOR.search(line):
@@ -243,7 +247,7 @@ def _parse_sets(lines, start, end):
                 name, raw, is_call = sub
                 wrapper = "for_once"
                 var = fm.group(2)
-                pat = re.compile(r"%%" + re.escape(var) + r"(?![A-Za-z0-9_])", re.I)
+                pat = _for_var(var)
                 for token in _for_tokens(fm.group(1), fm.group(3)):
                     item = _Set(i, line, name, pat.sub(token, raw), is_call, wrapper)
                     item.value = _expand(item.raw, env, item.is_call)
@@ -295,12 +299,13 @@ def _score(desc, item):
 def _find_descriptor(sets):
     best = None
     best_desc = None
-    best_score = -1
+    best_score = (-1, -1)
     for item in sets:
         desc = _descriptor(item.value)
         if desc is None:
             continue
-        score = _score(desc, item)
+        # A first fragment can itself parse as a shorter descriptor; the reconstruction holds it whole.
+        score = (_score(desc, item), len(item.value))
         if score > best_score:
             best = item
             best_desc = desc
@@ -364,7 +369,10 @@ def _attack(role):
 def _expansion(item):
     line = item.line.strip()
     raw = item.raw
-    if _FOR.search(line):
+    fm = _FOR.search(line)
+    # FOR-indirect only when the loop variable names the fragments; a one-item FOR around
+    # a plain SET is the for_once control wrapper, and the SET keeps its own expansion form.
+    if fm and _for_var(fm.group(2)).search(fm.group(4)):
         return "for_indirect"
     if re.search(r"![A-Za-z_][A-Za-z0-9_]*(?:[^!]*)!", raw):
         return "delayed"

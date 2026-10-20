@@ -6,7 +6,8 @@ call_subroutine, for_once, if_guard, errorlevel_guard) for a .bat/.cmd artifact.
 It finds the SET that concatenates the fragment variables, discards any FOR
 whose loop variable feeds that SET (the FOR-indirect expansion form, not a
 wrapper), then walks backwards from the statement:
-  * inline IF / ERRORLEVEL / && guard or one-item FOR around it -> that guard;
+  * inline IF / ERRORLEVEL / && guard or one-item FOR around it, or around the
+    `set "cfg="` reset a FOR-indirect loop accumulates into -> that guard;
   * a conditional jump that skips past it (ver>nul / if errorlevel 1 exit /b,
     if not defined X goto :after, ... || goto) -> if_guard / errorlevel_guard;
   * the label that leads to it: CALL -> call_subroutine, one-item FOR around a
@@ -37,7 +38,7 @@ OPND = r'(?:"[^"]*"|[^\s=()"]+)'
 IF_CMP = re.compile(r"(?i)(" + OPND + r")(?:\s*==\s*|\s+(?:equ|neq|lss|leq|gtr|geq)\s+)(" + OPND + r")\s*")
 FOR_HEAD = re.compile(
     r'(?i)for\s+(?:(/[dlrf])\s+(?:("[^"]*")\s+|(?![%"])(\S+)\s+)?)?'
-    r'(%%?[A-Za-z0-9#$])\s+in\s*\(([^()]*)\)\s*do\b\s*'
+    r'(%%?[^\s%"~()=,;])\s+in\s*\(([^()]*)\)\s*do\b\s*'
 )
 SET_AT = re.compile(r"(?i)(?<![\w.\-])set\s+(/[ap]\s+)?")
 REF = re.compile(
@@ -545,7 +546,37 @@ def find_statement(rows):
         rank = (0 if env else 1, len(known), uses, s["idx"])
         if best is None or rank > best[0]:
             best = (rank, s)
-    return (best[1] if best else None), values
+    if best is None:
+        return None, values
+    best[1]["inits"] = accumulator_inits(rows, sets, best[1])
+    return best[1], values
+
+
+def accumulator_inits(rows, sets, stmt):
+    """SETs that clear the reconstructed variable just before the statement.
+
+    A FOR-indirect or self-appending reconstruction is two lines, `set "cfg="` then the
+    loop that accumulates into cfg; a wrapper on that reset (if defined X set "cfg=")
+    wraps the reconstruction. Only plain SETs may sit between the reset and the statement.
+    """
+    key = stmt["name"].lower()
+    by_row = {}
+    for s in sets:
+        by_row.setdefault(s["idx"], []).append(s)
+    out = []
+    j = (stmt["stack"][0][1] if stmt["stack"] else stmt["idx"]) - 1
+    while j >= 0:
+        r = rows[j]
+        if r["kind"] in ("blank", "comment"):
+            j -= 1
+            continue
+        if r["kind"] != "cmd" or r["stack"] or j not in by_row:
+            break
+        for s in by_row[j]:
+            if s["name"].lower() == key and not set(refs_in(s["value"])) - {key}:
+                out.append(s)
+        j -= 1
+    return out
 
 
 def dynamic_fallback(rows, barrier_no):
@@ -634,12 +665,20 @@ def classify(rows, stmt, values):
     i = stmt["idx"]
     cands = []
     why = ""
-    eff = effective(stmt["wrappers"], stmt["value"])
-    if eff:
-        kind, info, src = eff[-1]
-        cands.append((KIND_ANSWER[kind], 0.92))
-        why = f"inline wrapper '{clean(src.strip())}' guards the statement"
+    inits = stmt.get("inits") or []
+    for part in [stmt] + inits:
+        eff = effective(part["wrappers"], part["value"])
+        if eff:
+            kind, info, src = eff[-1]
+            cands.append((KIND_ANSWER[kind], 0.92))
+            why = f"inline wrapper '{clean(src.strip())}' guards the statement"
+            if part is not stmt:
+                why = (f"inline wrapper '{clean(src.strip())}' guards the reset of {stmt['name']} "
+                       f"on line {rows[part['idx']]['no']} that the reconstruction accumulates into")
+            break
     start = stmt["stack"][0][1] if stmt["stack"] else i
+    for part in inits:
+        start = min(start, part["stack"][0][1] if part["stack"] else part["idx"])
     fc, fwhy = flow(rows, start, i, values)
     if cands:
         fc = [(v, min(c, 0.85)) for v, c in fc]
