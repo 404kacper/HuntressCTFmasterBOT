@@ -138,6 +138,7 @@ class Verdict:
     sent: dict[str, str] = field(default_factory=dict)
     steps: list[dict] = field(default_factory=list)
     batched: int = 0  # answers sent together because the clock left no time to send them singly
+    bisected: int = 0  # extra requests spent halving a refused batch down to its wrong answer
 
 
 def send_answers(gm: GameMaster, attempt, group: dict[str, str]) -> dict:
@@ -172,7 +173,10 @@ def submit_stepwise(gm: GameMaster, o: Outcome, library: Library, one_by_one: bo
     Master keeps correct partial progress ("accepted", with what remains). With
     one_by_one=False everything goes in a single request. On a timed attempt, the
     answers still left go in one request as soon as the deadline leaves no room for
-    one round trip each: a full answer set beats a refusal that names its culprit."""
+    one round trip each: a full answer set beats a refusal that names its culprit.
+    If that request is refused, it is halved (the half the Game Master accepts is
+    progress, the refused half is halved again) while the clock lasts, so the refusal
+    still names its culprit: about two round trips per halving instead of one per answer."""
     attempt, sol, dec = o.attempt, o.solution, o.decision
     ids = attempt.answer_id_map()[0]
     by_aid = {ids[q.id]: q.id for q in attempt.questions if q.id in ids}
@@ -185,15 +189,27 @@ def submit_stepwise(gm: GameMaster, o: Outcome, library: Library, one_by_one: bo
     v = Verdict()
     # A small download is about one round trip: the first estimate, until a submit measures one.
     rtt = min(o.timings.get("download") or 1.0, 1.0)
-    while items:
+    suspects: list = []  # answers refused together: at least one of them is wrong
+    rest: list = []
+    while items or suspects:
         left = attempt.seconds_left(gm.server_now()) if attempt.timed else None
-        if one_by_one and len(items) > 1 and left is not None \
-                and left < _CLOCK_MARGIN + len(items) * rtt * _RTT_SLACK:
-            v.batched = len(items)
-        if one_by_one and not v.batched:
-            group, items = dict(items[:1]), items[1:]
+        if suspects:
+            if left is not None and left <= 0:
+                v.message += (f"; the clock ran out with the refusal narrowed to {len(suspects)} answer(s): "
+                              + few(by_aid.get(aid, aid) for aid, _ in suspects))
+                return v
+            half = (len(suspects) + 1) // 2
+            group, rest = dict(suspects[:half]), suspects[half:]
+            v.bisected += 1
         else:
-            group, items = dict(items), []
+            rest = []
+            if one_by_one and len(items) > 1 and left is not None \
+                    and left < _CLOCK_MARGIN + len(items) * rtt * _RTT_SLACK:
+                v.batched = len(items)
+            if one_by_one and not v.batched:
+                group, items = dict(items[:1]), items[1:]
+            else:
+                group, items = dict(items), []
         t = time.perf_counter()
         try:
             reply = send_answers(gm, attempt, group)
@@ -210,17 +226,24 @@ def submit_stepwise(gm: GameMaster, o: Outcome, library: Library, one_by_one: bo
             v.correct, v.pending = True, pending(reply)
             return v
         if result.lower() == "accepted":
+            if suspects:
+                suspects = rest  # the wrong answer is in the half not sent yet
             continue
         v.message = f"the Game Master answered {result or reply!r}"
         if result.lower() not in ("incorrect", "wrong"):
             v.over = result.upper() in TERMINAL_RESULTS  # expired / failed: not a verdict on the answer
+            if suspects:
+                v.message += (f" while a refused batch was narrowed to {len(suspects)} answer(s): "
+                              + few(by_aid.get(aid, aid) for aid, _ in suspects))
             return v
         if len(group) == 1:
             aid, value = next(iter(group.items()))
             v.culprit = (by_aid.get(aid, aid), value, handler_of(aid))
-        else:
+            return v
+        if not one_by_one:
             v.message += " to the whole batch"
-        return v
+            return v
+        suspects, items = list(group.items()), rest + items
     v.message = "every answer was accepted but the Game Master never said CORRECT" if v.steps else "nothing to send"
     return v
 
@@ -679,6 +702,8 @@ def grind_one(gm: GameMaster, archive: Archive, library: Library, advisor: Advis
                 _record(o.run, o, v)
                 if v.batched:
                     log(f"  the clock was short: the last {v.batched} answers went in one request")
+                if v.bisected:
+                    log(f"  that request was refused: {v.bisected} more request(s) halving it to find the wrong answer")
                 if v.correct:
                     for m in _modules_used(o):
                         library.mark_proven(m, cid)

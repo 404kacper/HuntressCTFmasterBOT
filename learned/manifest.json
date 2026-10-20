@@ -28,17 +28,18 @@
     },
     "bre_managed_config_facts": {
       "advisor": "cli+kimi-cli",
-      "challenge": "binary-reverse-engineering-day-03-managed-configuration",
-      "proven": "20261020T061027Z",
+      "challenge": "binary-reverse-engineering-day-03-managed-configuration/mastery",
+      "proven": "20261020T091831Z",
       "proven_on": [
         "binary-reverse-engineering-day-03-managed-configuration",
-        "binary-reverse-engineering-day-03-managed-configuration/time_trial"
+        "binary-reverse-engineering-day-03-managed-configuration/time_trial",
+        "binary-reverse-engineering-day-03-managed-configuration/mastery"
       ],
       "replaced": null,
       "rounds": 1,
       "status": "proven",
-      "updated": "20261020T060952Z",
-      "versions": 2
+      "updated": "20261020T091759Z",
+      "versions": 3
     },
     "cpp_c_specimen_config_facts": {
       "advisor": "cli+kimi-cli",
@@ -68,11 +69,12 @@
     "elf_header_section_symbol_facts": {
       "advisor": "cli+kimi-cli",
       "challenge": "binary-reverse-engineering-day-03-managed-configuration",
-      "proven": "20261020T061027Z",
+      "proven": "20261020T091831Z",
       "proven_on": [
         "binary-reverse-engineering-day-01-c-elf-orientation",
         "binary-reverse-engineering-day-03-managed-configuration",
-        "binary-reverse-engineering-day-03-managed-configuration/time_trial"
+        "binary-reverse-engineering-day-03-managed-configuration/time_trial",
+        "binary-reverse-engineering-day-03-managed-configuration/mastery"
       ],
       "replaced": null,
       "rounds": 1,
@@ -83,10 +85,11 @@
     "elf_section_name_list": {
       "advisor": "cli+kimi-cli",
       "challenge": "binary-reverse-engineering-day-03-managed-configuration",
-      "proven": "20261020T061027Z",
+      "proven": "20261020T091831Z",
       "proven_on": [
         "binary-reverse-engineering-day-03-managed-configuration",
-        "binary-reverse-engineering-day-03-managed-configuration/time_trial"
+        "binary-reverse-engineering-day-03-managed-configuration/time_trial",
+        "binary-reverse-engineering-day-03-managed-configuration/mastery"
       ],
       "replaced": null,
       "rounds": 2,
@@ -127,12 +130,13 @@
     "layered_text_decode_slug": {
       "advisor": "cli",
       "challenge": "warmups-day-02",
-      "proven": "20261019T111047Z",
+      "proven": "20261020T091847Z",
       "proven_on": [
         "warmups-day-02",
         "warmups-day-02/time_trial",
         "warmups-day-02/mastery",
-        "warmups-day-03"
+        "warmups-day-03",
+        "warmups-day-03/time_trial"
       ],
       "replaced": null,
       "rounds": 1,

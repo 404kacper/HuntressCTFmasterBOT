@@ -23,7 +23,7 @@ from hunt.gm import GameMaster, GMError
 from hunt.learn import advisor as advisor_mod
 from hunt.learn import packet, policy
 from hunt.learn.advisor import SYSTEM_PROMPT, ScriptedAdvisor, extract_module
-from hunt.learn.grind import GrindOptions, grind, order, send_answers
+from hunt.learn.grind import GrindOptions, grind, order, send_answers, submit_stepwise
 from hunt.learn.library import Library
 from hunt.learn.sandbox import Sandbox, clean_env
 from hunt.learn.trial import run_trial
@@ -433,6 +433,19 @@ class Grinding(unittest.TestCase):
         self.assertEqual([len(s) for s in self.based.submissions], [2])
         self.assertTrue(any("went in one request" in line for line in self.log), self.log)
 
+    def test_a_refused_batch_is_halved_until_it_names_the_wrong_answer(self):
+        self.based.timed_start, self.based.time_limit = True, 1.8
+        self.lib.install("base64_note", WRONG, challenge=BASED, advisor="test", rounds=1)
+        adv = ScriptedAdvisor([_block(GOOD)])
+        res = self._grind(adv, ids=[BASED], accept_timer=True)
+        # both together (refused), then the first half alone: the message, refused
+        self.assertEqual([sorted(s) for s in self.based.submissions[:2]],
+                         [["decoded-length", "decoded-message"], ["decoded-message"]])
+        self.assertTrue(any("1 more request(s) halving it" in line for line in self.log), self.log)
+        self.assertTrue(any("refused: decoded-message" in line for line in self.log), self.log)
+        self.assertIn("refused the answer", adv.seen[0])
+        self.assertEqual(res[BASED].status, "scored", self.log)
+
     def test_no_retry_on_a_route_whose_retry_may_be_timed(self):
         self.based.incorrect_ends_attempt = True  # no run_for_time_supported: retry could start a clock
         res = self._grind(ScriptedAdvisor([_block(WRONG), _block(GOOD)]), ids=[BASED], fresh_variants=3)
@@ -600,6 +613,55 @@ class ServerHiccups(unittest.TestCase):
         with self.assertRaises(GMError):
             self.gm.retry(CID)
         self.assertEqual(self.fake.busy_next, 0)  # one request, not repeated
+
+
+class HalvingARefusedBatch(unittest.TestCase):
+    """A short clock sends everything at once; a refusal is then halved down to its culprit."""
+
+    class _GM:
+        def __init__(self, truth: dict):
+            self.truth, self.accepted, self.requests = truth, set(), []
+
+        def server_now(self):
+            return None
+
+        def submit(self, cid, group):
+            self.requests.append(dict(group))
+            if any(self.truth[k] != v for k, v in group.items()):
+                return {"result": "incorrect"}  # nothing kept from a refused request
+            self.accepted.update(group)
+            if self.accepted == set(self.truth):
+                return {"result": "CORRECT"}
+            return {"result": "accepted", "remaining": len(self.truth) - len(self.accepted)}
+
+    def _submit(self, n: int, wrong: set[int], seconds: float = 40.0):
+        from types import SimpleNamespace as NS
+        ids = [f"q{i:03d}" for i in range(n)]
+        sent = {q: ("bad" if i in wrong else "ok") for i, q in enumerate(ids)}
+        attempt = NS(challenge="c", timed=True, attempt_id="a", questions=[NS(id=q) for q in ids],
+                     answer_id_map=lambda: ({q: q for q in ids}, None), seconds_left=lambda now: seconds)
+        o = NS(attempt=attempt, solution=NS(answers={q: NS(handler="learned/m.h") for q in ids}),
+               decision=NS(submit=sent), timings={"download": 1.0})
+        gm = self._GM({q: "ok" for q in ids})
+        return submit_stepwise(gm, o, NS(trusted=lambda h: False)), gm
+
+    def test_one_wrong_answer_anywhere_in_159_is_named(self):
+        for pos in range(159):
+            v, gm = self._submit(159, {pos})
+            self.assertEqual(v.batched, 159)
+            self.assertEqual(v.culprit, (f"q{pos:03d}", "bad", "learned/m.h"), pos)
+            self.assertLessEqual(len(gm.requests), 1 + 2 * 8, pos)  # 2 per halving of 159
+            self.assertEqual(gm.requests[-1], {f"q{pos:03d}": "bad"})  # the refusal stands alone
+
+    def test_with_two_wrong_answers_the_first_is_named(self):
+        v, gm = self._submit(159, {40, 120})
+        self.assertEqual(v.culprit[0], "q040")
+
+    def test_the_clock_running_out_reports_how_far_it_got(self):
+        v, gm = self._submit(159, {7}, seconds=0.0)
+        self.assertIsNone(v.culprit)
+        self.assertEqual(len(gm.requests), 1)
+        self.assertIn("narrowed to 159 answer(s)", v.message)
 
 
 class SubmitWithoutReply(unittest.TestCase):
